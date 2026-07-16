@@ -72,6 +72,13 @@ class ManagedBot extends EventEmitter {
     delete options.reconnectDelayMs;
     delete options.authReconnectDelayMs;
     delete options.targetMobs;
+    if (options.auth === 'microsoft') {
+      options.onMsaCode = (data) => {
+        const verification = data.verification_uri || data.verificationUri || 'https://www.microsoft.com/link';
+        const code = data.user_code || data.userCode || '(missing code)';
+        this.log(`Microsoft sign-in required: open ${verification} and enter code ${code}.`, 'warn');
+      };
+    }
 
     let bot;
     try {
@@ -196,20 +203,36 @@ class ManagedBot extends EventEmitter {
   }
 
   handleChat(username, message) {
-    if (!this.bot || username === this.bot.username) return;
+    if (!this.bot || String(username).toLowerCase() === String(this.bot.username).toLowerCase()) return;
     if (this.chatLogEnabled) this.log(`[CHAT] <${username}> ${message}`);
-    if (!this.config.whitelist.includes(username)) return;
+    const allowed = this.config.whitelist.some((name) => name.toLowerCase() === String(username).toLowerCase());
+    if (!allowed) return;
 
-    const tokens = message.trim().split(/\s+/).filter(Boolean);
-    if (tokens.length < 2) return;
-    const target = tokens.shift();
-    if (!this.isTarget(target)) return;
-    this.execute(tokens[0], tokens.slice(1), { source: 'chat', sender: username });
+    const parsed = this.parseChatCommand(message);
+    if (!parsed) return;
+    this.log(`Accepted chat command from ${username}: ${parsed.command} ${parsed.args.join(' ')}`.trim());
+    this.execute(parsed.command, parsed.args, { source: 'chat', sender: username });
+  }
+
+  parseChatCommand(message) {
+    const tokens = String(message || '').trim().replace(/^!/, '').split(/\s+/).filter(Boolean);
+    if (tokens.length < 2) return null;
+
+    if (this.isTarget(tokens[0])) {
+      return { command: tokens[1], args: tokens.slice(2) };
+    }
+
+    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish']);
+    if (knownCommands.has(tokens[0].toLowerCase()) && this.isTarget(tokens[tokens.length - 1])) {
+      return { command: tokens[0], args: tokens.slice(1, -1) };
+    }
+    return null;
   }
 
   isTarget(target) {
-    const aliases = [this.id, this.displayName, this.bot?.username].filter(Boolean);
-    return target === 'all' || aliases.includes(target);
+    const normalized = String(target || '').toLowerCase();
+    const aliases = [this.id, this.displayName, this.bot?.username].filter(Boolean).map((value) => String(value).toLowerCase());
+    return normalized === 'all' || aliases.includes(normalized);
   }
 
   execute(command, args = [], context = { source: 'console', sender: 'CONSOLE' }) {
@@ -361,6 +384,3 @@ class ManagedBot extends EventEmitter {
 }
 
 module.exports = { ManagedBot };
-
-
-

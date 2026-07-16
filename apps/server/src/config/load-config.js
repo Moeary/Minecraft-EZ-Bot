@@ -14,6 +14,51 @@ function readJson(filePath, fallback) {
   }
 }
 
+function normalizeBotDefinition(bot, defaults = {}, index = 0) {
+  if (!bot || !bot.id || !bot.host || !bot.username) {
+    throw new Error(`Bot at index ${index} needs id, host, and username.`);
+  }
+
+  const definition = {
+    ...defaults,
+    ...bot,
+    id: String(bot.id).trim(),
+    displayName: String(bot.displayName || bot.id).trim(),
+    enabled: bot.enabled !== false,
+    port: Number(bot.port || 25565),
+    viewer: {
+      enabled: false,
+      viewDistance: 6,
+      firstPerson: false,
+      ...(bot.viewer || {})
+    }
+  };
+
+  if (!definition.id) throw new Error(`Bot at index ${index} needs a non-empty id.`);
+  if (!Number.isInteger(definition.port) || definition.port < 1 || definition.port > 65535) {
+    throw new Error(`Bot ${definition.id} needs a valid Minecraft server port.`);
+  }
+  if (definition.viewer.enabled && (!Number.isInteger(definition.viewer.port) || definition.viewer.port < 1 || definition.viewer.port > 65535)) {
+    throw new Error(`Bot ${definition.id} needs a valid viewer port.`);
+  }
+  return definition;
+}
+
+function validateBotDefinitions(bots) {
+  const ids = new Set();
+  const viewerPorts = new Set();
+  for (const bot of bots) {
+    const idKey = bot.id.toLowerCase();
+    if (ids.has(idKey)) throw new Error(`Duplicate bot id: ${bot.id}`);
+    ids.add(idKey);
+    if (bot.viewer.enabled) {
+      if (viewerPorts.has(bot.viewer.port)) throw new Error(`Duplicate viewer port: ${bot.viewer.port}`);
+      viewerPorts.add(bot.viewer.port);
+    }
+  }
+  return bots;
+}
+
 function loadConfig() {
   const botsPath = process.env.MCBOT_BOTS_CONFIG || path.join(CONFIG_DIR, 'bots.local.json');
   const whitelistPath = process.env.MCBOT_WHITELIST_CONFIG || path.join(CONFIG_DIR, 'whitelist.local.json');
@@ -32,45 +77,18 @@ function loadConfig() {
     ...(raw.defaults || {})
   };
 
-  const bots = raw.bots.map((bot, index) => {
-    if (!bot.id || !bot.host || !bot.username) throw new Error(`Bot at index ${index} needs id, host, and username.`);
-    const definition = {
-      ...defaults,
-      ...bot,
-      id: String(bot.id),
-      displayName: String(bot.displayName || bot.id),
-      enabled: bot.enabled !== false,
-      viewer: {
-        enabled: false,
-        viewDistance: 6,
-        firstPerson: false,
-        ...(bot.viewer || {})
-      }
-    };
-    if (definition.viewer.enabled && (!Number.isInteger(definition.viewer.port) || definition.viewer.port < 1 || definition.viewer.port > 65535)) {
-      throw new Error(`Bot ${definition.id} needs a valid viewer port.`);
-    }
-    return definition;
-  });
-
-  const ids = new Set();
-  const viewerPorts = new Set();
-  for (const bot of bots) {
-    if (ids.has(bot.id)) throw new Error(`Duplicate bot id: ${bot.id}`);
-    ids.add(bot.id);
-    if (bot.viewer.enabled) {
-      if (viewerPorts.has(bot.viewer.port)) throw new Error(`Duplicate viewer port: ${bot.viewer.port}`);
-      viewerPorts.add(bot.viewer.port);
-    }
-  }
-
+  const bots = validateBotDefinitions(raw.bots.map((bot, index) => normalizeBotDefinition(bot, defaults, index)));
+  const ids = new Set(bots.map((bot) => bot.id));
   const web = {
     host: '127.0.0.1',
     port: 3000,
+    viewerPortStart: 3101,
     autoStart: [],
     allowRawCommands: false,
     ...(raw.web || {})
   };
+  if (!Number.isInteger(web.port) || web.port < 1 || web.port > 65535) throw new Error('web.port must be a valid port.');
+  if (!Number.isInteger(web.viewerPortStart) || web.viewerPortStart < 1 || web.viewerPortStart > 65535) throw new Error('web.viewerPortStart must be a valid port.');
   if (!Array.isArray(web.autoStart)) throw new Error('web.autoStart must be an array of bot ids.');
   const missingAutoStart = web.autoStart.filter((id) => !ids.has(id));
   if (missingAutoStart.length) throw new Error(`Unknown bot ids in web.autoStart: ${missingAutoStart.join(', ')}`);
@@ -81,6 +99,7 @@ function loadConfig() {
     dataDir: DATA_DIR,
     botsPath,
     whitelistPath,
+    defaults,
     web,
     bots,
     whitelist: whitelist.map(String)
@@ -93,4 +112,11 @@ function authCachePath(config, botId) {
   return target;
 }
 
-module.exports = { loadConfig, authCachePath, ROOT_DIR };
+module.exports = {
+  loadConfig,
+  authCachePath,
+  normalizeBotDefinition,
+  validateBotDefinitions,
+  readJson,
+  ROOT_DIR
+};

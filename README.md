@@ -1,59 +1,68 @@
 # MC Bot Self
 
-一个使用 Mineflayer 的自托管 Minecraft 多机器人控制项目。项目由 **Pixi** 固定 Node.js/npm 环境，支持纯 CLI 运行，也可以选择启用 React + TypeScript Web 控制台和 Prismarine 第三方视角。
-
-## 项目结构
-
-```text
-apps/server/src/
-  cli.js                 # CLI 入口
-  config/load-config.js  # 本地配置加载与校验
-  core/                  # 多机器人生命周期、命令与重连逻辑
-  web/server.js          # HTTP API 与静态文件服务
-apps/web/                # React + TypeScript + Vite 控制台
-config/                  # 可提交的示例配置；*.local.json 不提交
-scripts/                 # 检查、开发启动和 Pixi 环境保护脚本
-data/auth/               # Microsoft 登录缓存，不提交
-pixi.toml / pixi.lock    # 运行环境、任务和锁文件
-```
+一个由 Pixi 固定运行环境的自托管 Mineflayer 多机器人项目。既可纯 CLI 运行，也可启用 React + TypeScript 控制台，在同一个 Web 管理端中创建、启动和控制多个机器人。
 
 ## 首次安装
 
-不要直接使用系统 Node.js 或 npm。仓库的 `preinstall` 会阻止非 Pixi 环境安装。
+不要调用系统 Node.js/npm；仓库的 `preinstall` 也会阻止非 Pixi 安装。
 
 ```powershell
 Copy-Item config/bots.example.json config/bots.local.json
 Copy-Item config/whitelist.example.json config/whitelist.local.json
 pixi run install
 pixi run check
+pixi run test
 ```
 
-编辑 `config/bots.local.json` 添加账号。`id` 是 CLI/Web 使用的稳定标识；每个启用 Viewer 的机器人必须分配不同端口。Microsoft 登录令牌会保存到忽略的 `data/auth/<bot-id>/`。
+真实服务器地址、账号、玩家白名单和 Microsoft 登录缓存只会写入被 Git 忽略的 `config/*.local.json` 与 `data/auth/`。
 
 ## Pixi 命令
 
 ```powershell
-pixi run bot Yukikaze  # 只启动一个机器人和交互式 CLI
-pixi run bots          # 启动所有 enabled 机器人
-pixi run build         # 构建生产版 React UI
-pixi run server        # 启动 API/已构建 UI，不强制自动启动机器人
-pixi run dev           # 同时启动 API 与 Vite 开发服务器
-pixi run check         # 检查后端 JS 和示例配置
-pixi run npm audit --omit=dev # 检查生产依赖漏洞
+pixi run bot Musashi  # 启动一个机器人和交互式 CLI
+pixi run bots         # 启动全部 enabled 机器人（无需 Web）
+pixi run server       # 启动生产 API 和已构建 Web UI
+pixi run dev          # 同时启动 API 与 Vite 开发服务器
+pixi run check        # 检查后端语法和示例配置
+pixi run test         # 运行聊天解析、配置持久化和 API 测试
+pixi run build        # 类型检查并构建 React UI
 ```
 
-生产 UI 默认访问 `http://127.0.0.1:3000`；开发 UI 默认访问 `http://127.0.0.1:5173`。在 `web.autoStart` 中填写机器人 ID，可让 Web 服务启动时自动连接，例如 `"autoStart": ["Yukikaze"]`。
+生产 UI 默认位于 `http://127.0.0.1:3000`。`pixi run server` 不会强制启动机器人；只有 `web.autoStart` 中列出的机器人会自动连接。
 
-## 控制功能
+## Web 管理
 
-现有命令保持为：`status`、`stop`、`fish`、`kill on/off`、`home`、`sethome`、`come`、`follow` 和 `cmd`。游戏内聊天仍要求使用 `<机器人名|all> <命令>`，且发送者必须位于 `config/whitelist.local.json`。
+Web 控制台支持：
 
-Web UI 提供启动/停止、状态、攻击、钓鱼、停止动作、自由命令输入和第三方视角入口。Viewer 默认 `firstPerson: false`，每个在线机器人使用自己的端口。
+- 新增、编辑和删除机器人，并持久化到 `config/bots.local.json`；
+- 单个启动、停止、重启以及全部启动/停止；
+- 快捷操作、自由命令输入、状态、背包、附近玩家与最近日志；
+- 直接编辑游戏内命令白名单；
+- 为每个启用 Prismarine Viewer 的机器人自动分配独立端口。
 
-## 安全说明
+控制 API/UI 只需要一个端口（默认 `3000`）。Minecraft 机器人是向服务器发起连接的客户端，不需要为每个机器人开放入站端口；只有第三方视角需要独立端口，默认从 `web.viewerPortStart`（`3101`）开始分配。Microsoft 首次登录的设备代码会出现在服务端控制台及 Web 日志中。
 
-- `config/*.local.json`、`.env*`、`data/auth/`、日志和构建产物均被 `.gitignore` 排除。
-- 示例配置只能使用占位地址、邮箱和玩家名；提交前运行 `git status --ignored` 检查。
-- Web 默认只监听 `127.0.0.1`。不要直接把控制 API 或 Viewer 端口暴露到公网；远程访问应放在带身份验证和 TLS 的反向代理或 VPN 后面。
-- `web.allowRawCommands` 控制 Web 是否允许 `cmd`。公开部署时建议保持 `false`。
+## 统一命令
 
+Web、CLI 和游戏聊天最终都调用同一套命令执行逻辑。现有命令包括 `status`、`stop`、`fish`、`kill on/off`、`home`、`sethome`、`come`、`follow` 和 `cmd`。
+
+游戏内发送者必须存在于 `config/whitelist.local.json`。机器人目标可放在命令前或命令后，不区分大小写：
+
+```text
+Musashi_Chan come
+come Musashi_Chan
+kill on Musashi_Chan
+status all
+```
+
+`come` 和 `follow` 在游戏聊天中默认以发命令的玩家为目标；Web/CLI 中则显式填写玩家名，例如 `come PlayerName`。
+
+## 目录与安全
+
+- `apps/server/src/core/`：机器人生命周期和统一命令。
+- `apps/server/src/web/`：控制 API 与静态 UI 服务。
+- `apps/web/`：React + TypeScript + Vite 前端。
+- `config/*.example.json`：可提交模板；`*.local.json` 永不提交。
+- `data/auth/`：Microsoft 登录缓存，永不提交。
+
+Web API 当前没有内置用户认证，默认只监听 `127.0.0.1`。远程使用时应放在 VPN，或带认证和 TLS 的反向代理后；不要直接暴露控制端口和 Viewer 端口到公网。公开部署时保持 `web.allowRawCommands: false`。

@@ -11,6 +11,7 @@ nodejs = ">=22,<25"
 [tasks]
 install = { cmd = "npm install", description = "Install Node.js workspace dependencies" }
 check = { cmd = "npm run check", description = "Check server JavaScript and project configuration" }
+test = { cmd = "npm test", description = "Run the server test suite" }
 build = { cmd = "npm run build", description = "Build the React web UI" }
 bot = { cmd = "npm run bot --", description = "Run one bot; append its id, for example: pixi run bot Yukikaze" }
 bots = { cmd = "npm run bots", description = "Run all configured bots in CLI mode" }

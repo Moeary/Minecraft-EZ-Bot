@@ -16,7 +16,8 @@
     "build": "npm run web:build",
     "check": "node scripts/check.mjs",
     "dev": "node scripts/dev.mjs",
-    "preinstall": "node scripts/ensure-pixi.cjs"
+    "preinstall": "node scripts/ensure-pixi.cjs",
+    "test": "node --test apps/server/test/*.test.js"
   },
   "dependencies": {
     "canvas": "^3.2.1",
