@@ -1,0 +1,19 @@
+[workspace]
+name = "mc-bot-self"
+version = "2.0.0"
+description = "Self-hosted Mineflayer bot control center"
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+nodejs = ">=22,<25"
+
+[tasks]
+install = { cmd = "npm install", description = "Install Node.js workspace dependencies" }
+check = { cmd = "npm run check", description = "Check server JavaScript and project configuration" }
+build = { cmd = "npm run build", description = "Build the React web UI" }
+bot = { cmd = "npm run bot --", description = "Run one bot; append its id, for example: pixi run bot Yukikaze" }
+bots = { cmd = "npm run bots", description = "Run all configured bots in CLI mode" }
+server = { cmd = "npm run server", description = "Start the optional web control server" }
+web-dev = { cmd = "npm run web:dev", description = "Start the Vite development UI" }
+dev = { cmd = "npm run dev", description = "Start the API and Vite UI together" }

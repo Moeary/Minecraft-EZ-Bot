@@ -1,0 +1,40 @@
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 3000,
+    "autoStart": [],
+    "allowRawCommands": false
+  },
+  "defaults": {
+    "checkTimeoutInterval": 60000,
+    "viewDistance": "tiny",
+    "reconnectDelayMs": 30000,
+    "authReconnectDelayMs": 60000,
+    "targetMobs": [
+      "zombified_piglin",
+      "wither_skeleton",
+      "zombie",
+      "skeleton",
+      "spider",
+      "creeper"
+    ]
+  },
+  "bots": [
+    {
+      "id": "example-bot",
+      "displayName": "ExampleBot",
+      "enabled": true,
+      "host": "minecraft.example.com",
+      "port": 25565,
+      "username": "your-microsoft-account@example.com",
+      "auth": "microsoft",
+      "version": "1.20.4",
+      "viewer": {
+        "enabled": true,
+        "port": 3101,
+        "viewDistance": 6,
+        "firstPerson": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "mc-bot-self",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Self-hosted Mineflayer bot control center",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "start": "node apps/server/src/cli.js run",
+    "bot": "node apps/server/src/cli.js run",
+    "bots": "node apps/server/src/cli.js run-all",
+    "server": "node apps/server/src/cli.js web",
+    "web:dev": "npm --workspace apps/web run dev",
+    "web:build": "npm --workspace apps/web run build",
+    "build": "npm run web:build",
+    "check": "node scripts/check.mjs",
+    "dev": "node scripts/dev.mjs",
+    "preinstall": "node scripts/ensure-pixi.cjs"
+  },
+  "dependencies": {
+    "canvas": "^3.2.1",
+    "minecraft-data": "^3.98.0",
+    "mineflayer": "^4.34.0",
+    "mineflayer-auto-eat": "^3.3.2",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-pvp": "^1.3.2",
+    "prismarine-viewer": "^1.33.0",
+    "vec3": "^0.1.8"
+  },
+  "allowScripts": {
+    "canvas": true,
+    "esbuild": true
+  }
+}
