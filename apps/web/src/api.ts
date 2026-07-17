@@ -17,6 +17,7 @@ export interface BotDefinition {
   auth: string;
   version: string;
   viewer: ViewerConfig;
+  commandWhitelist?: string[] | null;
 }
 
 export interface BotStatus {
@@ -85,12 +86,13 @@ export async function fetchLogs(botId?: string): Promise<LogEntry[]> {
   return (await request<{ logs: LogEntry[] }>(`/api/logs${query}`)).logs;
 }
 
-export async function fetchWhitelist(): Promise<string[]> {
-  return (await request<{ whitelist: string[] }>('/api/whitelist')).whitelist;
+export async function fetchWhitelist(botId?: string): Promise<string[]> {
+  const query = botId ? `?botId=${encodeURIComponent(botId)}` : '';
+  return (await request<{ whitelist: string[] }>(`/api/whitelist${query}`)).whitelist;
 }
 
-export function saveWhitelist(whitelist: string[]) {
-  return request<Result>('/api/whitelist', { method: 'PUT', body: JSON.stringify({ whitelist }) });
+export function saveWhitelist(whitelist: string[], botId?: string) {
+  return request<Result>('/api/whitelist', { method: 'PUT', body: JSON.stringify({ whitelist, botId }) });
 }
 
 export function botAction(id: string, action: 'start' | 'stop' | 'restart') {

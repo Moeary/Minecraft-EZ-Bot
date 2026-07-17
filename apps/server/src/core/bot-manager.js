@@ -39,7 +39,8 @@ class BotManager extends EventEmitter {
       configuredUsername: bot.definition.username,
       version: bot.definition.version || null,
       auth: bot.definition.auth || null,
-      viewer: { ...bot.definition.viewer }
+      viewer: { ...bot.definition.viewer },
+      commandWhitelist: bot.definition.commandWhitelist ? [...bot.definition.commandWhitelist] : null
     }));
   }
 
@@ -53,7 +54,8 @@ class BotManager extends EventEmitter {
       username: bot.username,
       auth: bot.auth || 'microsoft',
       version: bot.version || '',
-      viewer: { ...bot.viewer }
+      viewer: { ...bot.viewer },
+      commandWhitelist: bot.commandWhitelist ? [...bot.commandWhitelist] : null
     }));
   }
 
@@ -195,7 +197,7 @@ class BotManager extends EventEmitter {
     return this.logs.filter((entry) => !botId || entry.botId === botId).slice(-safeLimit);
   }
 
-  setWhitelist(names) {
+  setWhitelist(names, botId = null) {
     if (!Array.isArray(names)) return { ok: false, message: 'Whitelist must be an array of player names.' };
     const seen = new Set();
     const whitelist = [];
@@ -208,9 +210,19 @@ class BotManager extends EventEmitter {
       }
     }
     try {
+      if (botId) {
+        const runtime = this.get(botId);
+        if (!runtime) return { ok: false, message: `Unknown bot: ${botId}` };
+        if (runtime.state !== 'stopped') return { ok: false, message: 'Stop the bot before changing its whitelist.' };
+        const next = this.config.bots.map((bot) => bot.id === runtime.id ? { ...bot, commandWhitelist: whitelist } : bot);
+        saveBotsConfig(this.config, next);
+        this.config.bots = next;
+        runtime.definition = next.find((bot) => bot.id === runtime.id);
+        return { ok: true, message: `${runtime.displayName} whitelist saved.`, whitelist };
+      }
       saveWhitelist(this.config, whitelist);
       this.config.whitelist = whitelist;
-      return { ok: true, message: 'Whitelist saved.', whitelist };
+      return { ok: true, message: 'Global whitelist saved.', whitelist };
     } catch (error) {
       return { ok: false, message: error.message };
     }
@@ -232,3 +244,4 @@ class BotManager extends EventEmitter {
 }
 
 module.exports = { BotManager };
+

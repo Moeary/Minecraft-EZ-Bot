@@ -205,7 +205,8 @@ class ManagedBot extends EventEmitter {
   handleChat(username, message) {
     if (!this.bot || String(username).toLowerCase() === String(this.bot.username).toLowerCase()) return;
     if (this.chatLogEnabled) this.log(`[CHAT] <${username}> ${message}`);
-    const allowed = this.config.whitelist.some((name) => name.toLowerCase() === String(username).toLowerCase());
+    const whitelist = Array.isArray(this.definition.commandWhitelist) ? this.definition.commandWhitelist : this.config.whitelist;
+    const allowed = whitelist.some((name) => name.toLowerCase() === String(username).toLowerCase());
     if (!allowed) return;
 
     const parsed = this.parseChatCommand(message);
@@ -384,3 +385,4 @@ class ManagedBot extends EventEmitter {
 }
 
 module.exports = { ManagedBot };
+

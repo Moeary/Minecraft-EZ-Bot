@@ -31,7 +31,8 @@ function normalizeBotDefinition(bot, defaults = {}, index = 0) {
       viewDistance: 6,
       firstPerson: false,
       ...(bot.viewer || {})
-    }
+    },
+    commandWhitelist: Array.isArray(bot.commandWhitelist) ? [...new Set(bot.commandWhitelist.map((name) => String(name).trim()).filter(Boolean))] : null
   };
 
   if (!definition.id) throw new Error(`Bot at index ${index} needs a non-empty id.`);
@@ -120,3 +121,4 @@ module.exports = {
   readJson,
   ROOT_DIR
 };
+

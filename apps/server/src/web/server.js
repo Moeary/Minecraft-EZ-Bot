@@ -68,11 +68,14 @@ function createWebServer(manager) {
         });
       }
       if (pathname === '/api/whitelist' && request.method === 'GET') {
-        return json(response, 200, { whitelist: manager.config.whitelist });
+        const botId = url.searchParams.get('botId');
+        const runtime = botId ? manager.get(botId) : null;
+        if (botId && !runtime) return json(response, 404, { ok: false, message: `Unknown bot: ${botId}` });
+        return json(response, 200, { whitelist: runtime && Array.isArray(runtime.definition.commandWhitelist) ? runtime.definition.commandWhitelist : manager.config.whitelist });
       }
       if (pathname === '/api/whitelist' && request.method === 'PUT') {
         const body = await parseBody(request);
-        return sendResult(response, manager.setWhitelist(body.whitelist));
+        return sendResult(response, manager.setWhitelist(body.whitelist, body.botId || null));
       }
       if (pathname === '/api/logs' && request.method === 'GET') {
         return json(response, 200, { logs: manager.recentLogs(url.searchParams.get('botId'), url.searchParams.get('limit')) });
@@ -137,3 +140,4 @@ function startWebServer(manager) {
 }
 
 module.exports = { createWebServer, startWebServer };
+
