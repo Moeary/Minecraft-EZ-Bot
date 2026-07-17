@@ -168,6 +168,29 @@ class BotManager extends EventEmitter {
     return this.start(id);
   }
 
+  setViewerPerspective(id, firstPerson) {
+    const runtime = this.get(id);
+    if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
+    if (!runtime.definition.viewer?.enabled) return { ok: false, message: `${runtime.displayName} viewer is disabled.` };
+    try {
+      const next = this.config.bots.map((bot) => bot.id === runtime.id ? {
+        ...bot,
+        viewer: { ...bot.viewer, firstPerson: Boolean(firstPerson) }
+      } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      runtime.definition = next.find((bot) => bot.id === runtime.id);
+      if (runtime.state === 'online') {
+        runtime.closeViewer();
+        setTimeout(() => runtime.startViewer(), 300);
+      }
+      const label = firstPerson ? 'first-person' : 'third-person';
+      return { ok: true, message: `${runtime.displayName} viewer switched to ${label}.`, firstPerson: Boolean(firstPerson) };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
   execute(id, command, args = [], source = 'web') {
     const bot = this.get(id);
     if (!bot) return { ok: false, message: `Unknown bot: ${id}` };

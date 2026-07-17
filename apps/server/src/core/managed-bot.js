@@ -174,7 +174,7 @@ class ManagedBot extends EventEmitter {
         firstPerson: viewer.firstPerson
       });
       this.viewerStarted = true;
-      this.log(`Third-person viewer listening on port ${viewer.port}.`);
+      this.log(`${viewer.firstPerson ? 'First' : 'Third'}-person viewer listening on port ${viewer.port}.`);
     } catch (error) {
       this.log(`Viewer failed to start: ${error.message}`, 'error');
     }
@@ -369,6 +369,7 @@ class ManagedBot extends EventEmitter {
       health: typeof bot?.health === 'number' ? Math.round(bot.health) : null,
       food: typeof bot?.food === 'number' ? Math.round(bot.food) : null,
       position: bot?.entity?.position ? { x: Math.round(bot.entity.position.x), y: Math.round(bot.entity.position.y), z: Math.round(bot.entity.position.z) } : null,
+      dimension: bot?.game?.dimension || bot?.game?.level?.name || null,
       killAura: this.killAuraEnabled,
       fishing: this.fishing,
       inventory: inventory.slice(0, 8).map((item) => ({ name: item.name, count: item.count })),
@@ -385,4 +386,3 @@ class ManagedBot extends EventEmitter {
 }
 
 module.exports = { ManagedBot };
-

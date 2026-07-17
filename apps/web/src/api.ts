@@ -35,6 +35,7 @@ export interface BotStatus {
   health: number | null;
   food: number | null;
   position: { x: number; y: number; z: number } | null;
+  dimension: string | null;
   killAura: boolean;
   fishing: boolean;
   inventory: Array<{ name: string; count: number }>;
@@ -103,6 +104,13 @@ export function batchAction(action: 'start' | 'stop' | 'restart', ids: string[] 
   return request<Result & { results: Array<Result & { id: string }> }>('/api/batch', {
     method: 'POST',
     body: JSON.stringify({ action, ids })
+  });
+}
+
+export function setViewerPerspective(id: string, firstPerson: boolean) {
+  return request<Result>(`/api/bots/${encodeURIComponent(id)}/perspective`, {
+    method: 'POST',
+    body: JSON.stringify({ firstPerson })
   });
 }
 

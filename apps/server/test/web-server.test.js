@@ -47,6 +47,13 @@ test('web API manages bot definitions and whitelist without starting Minecraft',
   assert.equal(created.status, 201);
   assert.equal(manager.definition('web-bot').viewer.port, 4200);
 
+  const perspective = await api(base, '/api/bots/web-bot/perspective', {
+    method: 'POST',
+    body: JSON.stringify({ firstPerson: true })
+  });
+  assert.equal(perspective.status, 200);
+  assert.equal(manager.definition('web-bot').viewer.firstPerson, true);
+
   const whitelist = await api(base, '/api/whitelist', {
     method: 'PUT',
     body: JSON.stringify({ whitelist: ['Operator'] })

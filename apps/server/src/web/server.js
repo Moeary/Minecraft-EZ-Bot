@@ -85,7 +85,7 @@ function createWebServer(manager) {
         return json(response, 200, manager.batch(body.action, Array.isArray(body.ids) ? body.ids : []));
       }
 
-      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command))?$/);
+      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective))?$/);
       if (match) {
         const id = decodeURIComponent(match[1]);
         const action = match[2];
@@ -98,6 +98,10 @@ function createWebServer(manager) {
         if (request.method === 'POST' && action === 'start') return sendResult(response, manager.start(id));
         if (request.method === 'POST' && action === 'stop') return sendResult(response, manager.stop(id));
         if (request.method === 'POST' && action === 'restart') return sendResult(response, manager.restart(id));
+        if (request.method === 'POST' && action === 'perspective') {
+          const body = await parseBody(request);
+          return sendResult(response, manager.setViewerPerspective(id, body.firstPerson));
+        }
         if (request.method === 'POST' && action === 'command') {
           const body = await parseBody(request);
           const result = body.command ? manager.executeLine(id, body.command, 'web') : { ok: false, message: 'Missing command.' };
