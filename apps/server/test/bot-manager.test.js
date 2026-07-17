@@ -83,3 +83,64 @@ test('persists Web-configured region mining filters across manager restarts', (t
   assert.equal(restarted.list()[0].region.mode, 'blacklist');
   assert.deepEqual(restarted.list()[0].region.customDeny, ['diamond_ore', 'ancient_debris']);
 });
+
+test('persists global and per-bot skill policies and copies them between bots', (t) => {
+  const config = createConfig();
+  t.after(() => fs.rmSync(config.rootDir, { recursive: true, force: true }));
+  const manager = new BotManager(config);
+  manager.add({ id: 'alpha', host: 'localhost', username: 'Alpha', auth: 'offline', viewer: { enabled: false } });
+  manager.add({ id: 'beta', host: 'localhost', username: 'Beta', auth: 'offline', viewer: { enabled: false } });
+
+  const globalResult = manager.updateSkills('global', null, {
+    mining: { enabled: true, priority: 68 },
+    'chat-command': { enabled: true, priority: 10 }
+  });
+  assert.equal(globalResult.ok, true);
+  assert.equal(manager.skillSettings().global.mining.priority, 68);
+
+  const alphaResult = manager.updateSkills('bot', 'alpha', {
+    ...manager.skillSettings().global,
+    combat: { enabled: true, priority: 92 },
+    supply: { enabled: true, priority: 88 }
+  });
+  assert.equal(alphaResult.ok, true);
+  const copyResult = manager.copySkills('alpha', ['beta']);
+  assert.equal(copyResult.ok, true);
+  assert.equal(manager.get('beta').effectiveSkillConfig().combat.priority, 92);
+  assert.equal(manager.get('beta').effectiveSkillConfig().supply.enabled, true);
+
+  const saved = JSON.parse(fs.readFileSync(config.botsPath, 'utf8'));
+  assert.equal(saved.defaults.skills.mining.priority, 68);
+  assert.equal(saved.bots.find((bot) => bot.id === 'alpha').skills.combat.enabled, true);
+  assert.equal(saved.bots.find((bot) => bot.id === 'beta').skills.supply.priority, 88);
+});
+
+test('normalizes and persists fixed supply stations with beds and multiple container roles', (t) => {
+  const config = createConfig();
+  t.after(() => fs.rmSync(config.rootDir, { recursive: true, force: true }));
+  const manager = new BotManager(config);
+  manager.add({ id: 'miner', host: 'localhost', username: 'Miner', auth: 'offline', viewer: { enabled: false } });
+
+  const result = manager.configureSupply('miner', [{
+    id: 'main-base',
+    name: '主补给站',
+    dimension: 'minecraft:overworld',
+    x: 10,
+    y: 64,
+    z: -5,
+    bed: { x: 12, y: 64, z: -5 },
+    priority: 20,
+    containers: [
+      { x: 9, y: 64, z: -5, role: 'storage' },
+      { x: 8, y: 64, z: -5, role: 'pickup' }
+    ]
+  }]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.points[0].dimension, 'overworld');
+  assert.deepEqual(result.points[0].bed, { x: 12, y: 64, z: -5 });
+  assert.deepEqual(result.points[0].containers.map((container) => container.role), ['storage', 'pickup']);
+  const saved = JSON.parse(fs.readFileSync(config.botsPath, 'utf8'));
+  assert.equal(saved.bots[0].resupplyPoints[0].name, '主补给站');
+  assert.equal(saved.bots[0].resupplyPoints[0].containers.length, 2);
+});

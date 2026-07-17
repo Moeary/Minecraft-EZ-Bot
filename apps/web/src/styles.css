@@ -180,3 +180,24 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .first-person-controls input[type='range'] { width: 82px; accent-color: #2e7b48; }
 .first-person-controls b { min-width: 34px; color: #2e7b48; font: 10px 'DM Mono', monospace; }
 .first-person-controls small { flex-basis: 100%; color: #8a9c90; font-size: 9px; }
+
+.skill-settings-panel { margin-bottom: 24px; }
+.skill-settings-panel .card-header { align-items: flex-start; }
+.skill-policy-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+.skill-policy-toolbar select, .skill-policy-toolbar button, .supply-settings select { min-height: 42px; }
+.skill-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.skill-policy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto 70px auto; gap: 8px; align-items: center; border: 1px solid var(--line, #dfe9e2); border-radius: 14px; padding: 12px 14px; background: #fbfdfb; }
+.skill-policy-name { display: flex; gap: 8px; align-items: center; font-weight: 700; }
+.skill-policy-name b { color: #168344; }
+.priority-input { width: 64px; }
+.bot-skill-status { display: grid; gap: 8px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line, #dfe9e2); }
+.bot-skill-status-row { display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center; font-size: 13px; }
+.bot-skill-status-row code { margin-right: 6px; }
+.bot-skill-status-row em { color: #8a9c91; font-style: normal; }
+.supply-settings { display: grid; gap: 14px; }
+.supply-settings .form-grid { margin-top: 0; }
+.supply-settings textarea { width: 100%; resize: vertical; }
+.point-list { display: grid; gap: 8px; }
+.point-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid var(--line, #dfe9e2); border-radius: 12px; padding: 11px 13px; }
+.point-row small { display: block; color: #83958b; margin-top: 4px; }
+@media (max-width: 900px) { .skill-policy-grid { grid-template-columns: 1fr; } .bot-skill-status-row { grid-template-columns: 1fr; gap: 5px; } }

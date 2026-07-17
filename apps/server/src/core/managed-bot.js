@@ -6,7 +6,8 @@ const pvp = require('mineflayer-pvp').plugin;
 const mineflayerViewer = require('prismarine-viewer').mineflayer;
 const minecraftData = require('minecraft-data');
 const { Vec3 } = require('vec3');
-const { authCachePath } = require('../config/load-config');
+const { authCachePath, normalizeSkillSettings, normalizeSupplyPoint } = require('../config/load-config');
+const { TaskScheduler } = require('./task-scheduler');
 const { saveBotsConfig } = require('../config/config-store');
 
 const MAX_REGION_VOLUME = 32768;
@@ -77,13 +78,83 @@ class ManagedBot extends EventEmitter {
     this.resupplyBusy = false;
     this.maintenanceBusy = false;
     this.digging = false;
-    this.navigationLock = Promise.resolve();
-    this.resupplyPoints = Array.isArray(botConfig.resupplyPoints) ? botConfig.resupplyPoints.map((point) => ({ x: Number(point.x), y: Number(point.y), z: Number(point.z) })).filter((point) => [point.x, point.y, point.z].every(Number.isFinite)) : [];
+    this.taskScheduler = new TaskScheduler(this.effectiveSkillConfig());
+    this.resupplyPoints = Array.isArray(botConfig.resupplyPoints) ? botConfig.resupplyPoints.map(normalizeSupplyPoint).filter(Boolean) : [];
+    this.skillConfig = this.effectiveSkillConfig();
     this.supplyRole = 'auto';
     this.chatLogEnabled = false;
     this.viewerStarted = false;
     this.alertLastSent = new Map();
     this.activeAlerts = new Set();
+  }
+
+  effectiveSkillConfig() {
+    return normalizeSkillSettings(this.config.defaults?.skills || {}, this.definition.skills || {});
+  }
+
+  updateSkillConfig(settings) {
+    this.skillConfig = normalizeSkillSettings(this.config.defaults?.skills || {}, settings || {});
+    this.taskScheduler.configure(this.skillConfig);
+    if (this.bot?.entity) this.applyConfiguredSkills();
+    this.emit('state', this.publicStatus());
+    return this.skillConfig;
+  }
+
+  applyConfiguredSkills() {
+    const skills = this.effectiveSkillConfig();
+    this.skillConfig = skills;
+    this.taskScheduler.configure(skills);
+    this.chatLogEnabled = skills['chat-command'].enabled;
+    if (skills.combat.enabled) {
+      this.killAuraEnabled = true;
+    } else {
+      this.killAuraEnabled = false;
+      this.bot?.pvp?.stop?.();
+    }
+    if (skills.supply.enabled) {
+      this.setSupply('on', false);
+      this.resupplyEnabled = true;
+    } else {
+      this.setSupply('off', false);
+      this.resupplyEnabled = false;
+    }
+    if (skills.survival.enabled) {
+      this.sleepEnabled = true;
+      this.resupplyEnabled = true;
+      this.startMaintenanceLoop();
+    } else {
+      this.sleepEnabled = false;
+      if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+      if (!skills.supply.enabled) this.resupplyEnabled = false;
+    }
+    if (!skills.fishing.enabled && this.fishing) {
+      this.fishing = false;
+      if (this.fishingTimer) clearTimeout(this.fishingTimer);
+      this.fishingTimer = null;
+    } else if (skills.fishing.enabled && !this.fishing) {
+      this.startFishing(false);
+    }
+    if (!skills.mining.enabled) {
+      this.mining = false;
+      this.miningTarget = null;
+      if (this.miningTimer) clearTimeout(this.miningTimer);
+      this.miningTimer = null;
+      if (this.regionMining) this.stopRegionMining();
+    } else if (this.regionPlan && !this.regionMining && !this.mining) {
+      this.startRegionMining(false);
+    }
+    if (skills.pathfinder.enabled) this.log('Pathfinder skill enabled; navigation is available to other skills.');
+  }
+
+  configureSupplyPoints(points = []) {
+    this.resupplyPoints = Array.isArray(points) ? points.map(normalizeSupplyPoint).filter(Boolean) : [];
+    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point, containers: point.containers.map((container) => ({ ...container })), bed: point.bed ? { ...point.bed } : null })) } : bot);
+    saveBotsConfig(this.config, next);
+    this.config.bots = next;
+    this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    this.emit('state', this.publicStatus());
+    return this.resupplyPoints;
   }
 
   log(message, level = 'info') {
@@ -180,6 +251,7 @@ class ManagedBot extends EventEmitter {
       this.startViewer();
       this.startAttackLoop();
       this.startResourceMonitor();
+      this.applyConfiguredSkills();
       if (this.sleepEnabled || this.resupplyEnabled) this.startMaintenanceLoop();
       this.log('Ready for commands.');
     });
@@ -263,6 +335,75 @@ class ManagedBot extends EventEmitter {
     this.activeAlerts = new Set();
   }
 
+  effectiveSkillConfig() {
+    return normalizeSkillSettings(this.config.defaults?.skills || {}, this.definition.skills || {});
+  }
+
+  updateSkillConfig(settings) {
+    this.skillConfig = normalizeSkillSettings(this.config.defaults?.skills || {}, settings || {});
+    this.taskScheduler.configure(this.skillConfig);
+    if (this.bot?.entity) this.applyConfiguredSkills();
+    this.emit('state', this.publicStatus());
+    return this.skillConfig;
+  }
+
+  applyConfiguredSkills() {
+    const skills = this.effectiveSkillConfig();
+    this.skillConfig = skills;
+    this.taskScheduler.configure(skills);
+    this.chatLogEnabled = skills['chat-command'].enabled;
+    if (skills.combat.enabled) {
+      this.killAuraEnabled = true;
+    } else {
+      this.killAuraEnabled = false;
+      this.bot?.pvp?.stop?.();
+    }
+    if (skills.supply.enabled) {
+      this.setSupply('on', false);
+      this.resupplyEnabled = true;
+    } else {
+      this.setSupply('off', false);
+      this.resupplyEnabled = false;
+    }
+    if (skills.survival.enabled) {
+      this.sleepEnabled = true;
+      this.resupplyEnabled = true;
+      this.startMaintenanceLoop();
+    } else {
+      this.sleepEnabled = false;
+      if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+      if (!skills.supply.enabled) this.resupplyEnabled = false;
+    }
+    if (!skills.fishing.enabled && this.fishing) {
+      this.fishing = false;
+      if (this.fishingTimer) clearTimeout(this.fishingTimer);
+      this.fishingTimer = null;
+    } else if (skills.fishing.enabled && !this.fishing) {
+      this.startFishing(false);
+    }
+    if (!skills.mining.enabled) {
+      this.mining = false;
+      this.miningTarget = null;
+      if (this.miningTimer) clearTimeout(this.miningTimer);
+      this.miningTimer = null;
+      if (this.regionMining) this.stopRegionMining();
+    } else if (this.regionPlan && !this.regionMining && !this.mining) {
+      this.startRegionMining(false);
+    }
+    if (skills.pathfinder.enabled) this.log('Pathfinder skill enabled; navigation is available to other skills.');
+  }
+
+  configureSupplyPoints(points = []) {
+    this.resupplyPoints = Array.isArray(points) ? points.map(normalizeSupplyPoint).filter(Boolean) : [];
+    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point, containers: point.containers.map((container) => ({ ...container })), bed: point.bed ? { ...point.bed } : null })) } : bot);
+    saveBotsConfig(this.config, next);
+    this.config.bots = next;
+    this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    this.emit('state', this.publicStatus());
+    return this.resupplyPoints;
+  }
+
   startAttackLoop() {
     if (this.attackTimer) return;
     this.attackTimer = setInterval(() => {
@@ -271,6 +412,7 @@ class ManagedBot extends EventEmitter {
   }
 
   clearRuntimeLoops() {
+    this.killAuraEnabled = false;
     if (this.attackTimer) clearInterval(this.attackTimer);
     this.attackTimer = null;
     if (this.fishingTimer) clearTimeout(this.fishingTimer);
@@ -297,6 +439,7 @@ class ManagedBot extends EventEmitter {
 
   handleChat(username, message) {
     if (!this.bot || String(username).toLowerCase() === String(this.bot.username).toLowerCase()) return;
+    if (!this.effectiveSkillConfig()['chat-command'].enabled) return;
     if (this.chatLogEnabled) this.log(`[CHAT] <${username}> ${message}`);
     const whitelist = Array.isArray(this.definition.commandWhitelist) ? this.definition.commandWhitelist : this.config.whitelist;
     const allowed = whitelist.some((name) => name.toLowerCase() === String(username).toLowerCase());
@@ -413,23 +556,29 @@ class ManagedBot extends EventEmitter {
     return `[${status.username || this.displayName}] HP:${status.health ?? '-'} Food:${status.food ?? '-'} Kill:${this.killAuraEnabled ? 'ON' : 'OFF'} | Inv: ${inventory}${nearby}`;
   }
 
-  startFishing() {
-    if (this.fishing) return this.respond("I'm already fishing!");
+  startFishing(announce = true) {
+    if (this.fishing) return announce ? this.respond("I'm already fishing!") : { ok: true, message: 'Fishing already running.' };
     const bot = this.bot;
     const rod = bot.inventory.items().find((item) => item.name.includes('fishing_rod'));
-    if (!rod) return this.respond(`[${bot.username}] No fishing rod in inventory.`);
+    if (!rod) {
+      const result = `[${bot.username}] No fishing rod in inventory.`;
+      if (announce) return this.respond(result);
+      this.log(result, 'warn');
+      return { ok: false, message: result };
+    }
     const boat = bot.nearestEntity((entity) => entity.name?.toLowerCase().includes('boat') && entity.position.distanceTo(bot.entity.position) < 5);
     this.fishing = true;
     Promise.resolve()
       .then(async () => {
         if (boat && bot.vehicle !== boat) await bot.mount(boat);
         await bot.equip(rod, 'hand');
-        this.respond('Started fishing...');
+        if (announce) this.respond('Started fishing...');
         this.fishingLoop();
       })
       .catch((error) => {
         this.fishing = false;
-        this.respond(`Fishing setup error: ${error.message}`);
+        if (announce) this.respond(`Fishing setup error: ${error.message}`);
+        else this.log(`Fishing setup error: ${error.message}`, 'warn');
       });
     return { ok: true, message: 'Fishing started.' };
   }
@@ -496,7 +645,7 @@ class ManagedBot extends EventEmitter {
       }
       const block = bot.blockAt(positions[0]);
       if (!block) throw new Error('Target block is not loaded.');
-      await this.moveToBlock(block);
+      await this.moveToBlock(block, 'mining');
       const current = bot.blockAt(block.position);
       if (!current || !bot.canDigBlock(current)) throw new Error('Target block is not diggable from the current position.');
       const toolReady = await this.prepareHarvestTool(current, 'Targeted mining');
@@ -691,17 +840,17 @@ class ManagedBot extends EventEmitter {
     return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
   }
 
-  startRegionMining() {
-    if (this.mining) return this.respond(`[${this.bot.username}] Targeted mining is active; stop it before starting region mining.`);
-    if (this.regionMining) return this.respond(`[${this.bot.username}] Region mining is already running.`);
-    if (!this.regionPlan) return this.respond(`[${this.bot.username}] Set a region first with area set.`);
-    if (this.regionPlan.mode === 'whitelist' && !this.regionPlan.allow.length) return this.respond(`[${this.bot.username}] Whitelist mode has no allowed blocks; refusing to start.`);
+  startRegionMining(announce = true) {
+    if (this.mining) return announce ? this.respond(`[${this.bot.username}] Targeted mining is active; stop it before starting region mining.`) : { ok: false, message: 'Targeted mining is active.' };
+    if (this.regionMining) return announce ? this.respond(`[${this.bot.username}] Region mining is already running.`) : { ok: true, message: 'Region mining already running.' };
+    if (!this.regionPlan) return announce ? this.respond(`[${this.bot.username}] Set a region first with area set.`) : { ok: false, message: 'No mining region configured.' };
+    if (this.regionPlan.mode === 'whitelist' && !this.regionPlan.allow.length) return announce ? this.respond(`[${this.bot.username}] Whitelist mode has no allowed blocks; refusing to start.`) : { ok: false, message: 'Whitelist has no allowed blocks.' };
     this.regionMining = true;
     this.regionPlan.active = true;
     this.regionPlan.pausedReason = null;
     this.regionPlan.retryCount = 0;
     this.log(`Region mining started (${this.regionPlan.mode}, ${this.regionPlan.volume} blocks).`);
-    this.respond(`[${this.bot.username}] Region mining started. Containers, fluids, bedrock and protected blocks remain untouched.`);
+    if (announce) this.respond(`[${this.bot.username}] Region mining started. Containers, fluids, bedrock and protected blocks remain untouched.`);
     this.regionMiningLoop();
     return { ok: true, message: 'Region mining started.' };
   }
@@ -785,11 +934,8 @@ class ManagedBot extends EventEmitter {
     return { complete: true };
   }
 
-  async moveToBlock(block) {
-    let release;
-    const previous = this.navigationLock;
-    this.navigationLock = new Promise((resolve) => { release = resolve; });
-    await previous;
+  async moveToBlock(block, taskName = 'pathfinder') {
+    const release = await this.taskScheduler.acquire(taskName);
     try {
       const movements = new Movements(this.bot, minecraftData(this.bot.version));
       movements.canDig = false;
@@ -856,14 +1002,14 @@ class ManagedBot extends EventEmitter {
           return;
         }
         if (scan.unloaded) {
-          await this.moveToBlock({ position: scan.unloaded });
+          await this.moveToBlock({ position: scan.unloaded }, 'mining');
           if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 250);
           return;
         }
         block = scan.block;
       }
       if (!block || !this.regionMining) return;
-      await this.moveToBlock(block);
+      await this.moveToBlock(block, 'mining');
       if (!this.regionMining) return;
       const current = this.bot.blockAt(block.position);
       if (this.bot.inventory.emptySlotCount() === 0) {
@@ -941,7 +1087,7 @@ class ManagedBot extends EventEmitter {
       const block = this.bot.blockAt(seal.position);
       if (!block || cleanBlockName(block.name) !== cleanBlockName(seal.blockName)) continue;
       try {
-        await this.moveToBlock(block);
+        await this.moveToBlock(block, 'mining');
         await this.bot.dig(block, true, 'raycast');
         removed += 1;
       } catch (error) {
@@ -964,7 +1110,7 @@ class ManagedBot extends EventEmitter {
       .then(() => ({ ok: true, message: `Looking at yaw ${yaw}°, pitch ${pitch}°.` }));
   }
 
-  setSleepMode(mode = 'on') {
+  setSleepMode(mode = 'on', announce = true) {
     const normalized = String(mode || 'on').toLowerCase();
     this.sleepEnabled = !['off', 'stop', 'disable'].includes(normalized);
     if (this.sleepEnabled) this.startMaintenanceLoop();
@@ -972,7 +1118,8 @@ class ManagedBot extends EventEmitter {
       clearTimeout(this.maintenanceTimer);
       this.maintenanceTimer = null;
     }
-    return this.respond(`[${this.bot.username}] Automatic sleep ${this.sleepEnabled ? 'enabled' : 'disabled'}.`);
+    const message = `[${this.bot.username}] Automatic sleep ${this.sleepEnabled ? 'enabled' : 'disabled'}.`;
+    return announce ? this.respond(message) : { ok: true, message };
   }
 
   persistResupplyPoints() {
@@ -1005,7 +1152,8 @@ class ManagedBot extends EventEmitter {
     if (action === 'point' && pointAction === 'add') {
       const values = args.slice(2, 5).map(Number);
       if (values.length !== 3 || values.some((value) => !Number.isInteger(value))) return this.respond(`[${this.bot.username}] Usage: resupply point add <x> <y> <z>`);
-      this.resupplyPoints.push({ x: values[0], y: values[1], z: values[2] });
+      const point = normalizeSupplyPoint({ x: values[0], y: values[1], z: values[2], name: `补给点 ${this.resupplyPoints.length + 1}` }, this.resupplyPoints.length);
+      if (point) this.resupplyPoints.push(point);
       this.persistResupplyPoints();
       return this.respond(`[${this.bot.username}] Supply point added at ${values.join(', ')}.`);
     }
@@ -1040,24 +1188,39 @@ class ManagedBot extends EventEmitter {
     }
   }
 
+  currentDimension() {
+    return String(this.bot?.game?.dimension || '').replace(/^minecraft:/, '');
+  }
+
+  matchingSupplyPoints() {
+    const dimension = this.currentDimension();
+    return this.resupplyPoints.filter((point) => point.enabled !== false && (!point.dimension || point.dimension === dimension));
+  }
+
+  supplyContainers(point) {
+    return point.containers?.length ? point.containers : [{ x: point.x, y: point.y, z: point.z, role: 'mixed' }];
+  }
+
   async maybeSleep() {
     const bot = this.bot;
     if (!bot?.time || bot.isSleeping || !['overworld', 'minecraft:overworld'].includes(bot.game?.dimension)) return;
     const time = Number(bot.time.timeOfDay);
     if (!(time >= 12541 && time <= 23458)) return;
-    const bedIds = Object.entries(minecraftData(bot.version).blocksByName)
-      .filter(([name]) => name.endsWith('_bed') || name === 'bed').map(([, block]) => block.id);
-    const positions = bot.findBlocks({ matching: bedIds, maxDistance: 32, count: 1 });
-    if (!positions.length) {
-      this.log('Night detected, but no bed is available within 32 blocks.', 'warn');
+    const point = this.matchingSupplyPoints().find((candidate) => candidate.bed);
+    if (!point?.bed) {
+      this.resourceAlert('no-supply-bed', true, '夜晚到了，但配置的补给点没有设置床位。', 120000);
       return;
     }
-    const bed = bot.blockAt(positions[0]);
-    if (!bed || !bot.sleep) return;
-    await this.moveToBlock(bed);
+    const bed = bot.blockAt(new Vec3(point.bed.x, point.bed.y, point.bed.z));
+    if (!bed || !String(bed.name).endsWith('bed') || !bot.sleep) {
+      this.resourceAlert('no-supply-bed', true, `配置的补给点床位不可用：${point.name} (${point.bed.x},${point.bed.y},${point.bed.z})。`, 120000);
+      return;
+    }
+    this.resourceAlert('no-supply-bed', false, '');
+    await this.moveToBlock(bed, 'survival');
     if (!this.sleepEnabled || bot.isSleeping) return;
     await bot.sleep(bed);
-    this.log('Sleeping through the night.');
+    this.log(`Sleeping at configured supply point: ${point.name}.`);
   }
 
   isToolLow(item) {
@@ -1172,40 +1335,62 @@ class ManagedBot extends EventEmitter {
     const needFood = requirements.requireFood ?? !hasFood;
     const inventoryFull = bot.inventory.emptySlotCount() <= 2;
     if (!inventoryFull && (!needPickaxe || hasPickaxe) && (!needFood || hasFood)) return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
-    if (!this.resupplyPoints.length) return { ok: false, reason: 'no-point', message: 'no supply point is configured' };
-    const point = this.resupplyPoints.map((candidate) => ({ ...candidate, distance: bot.entity.position.distanceTo(new Vec3(candidate.x, candidate.y, candidate.z)) })).sort((a, b) => a.distance - b.distance)[0];
-    const block = bot.blockAt(new Vec3(point.x, point.y, point.z));
-    if (!block || !isRegionContainerName(block.name)) {
-      const message = `configured supply point ${point.x},${point.y},${point.z} is not a supported container`;
-      this.log(message, 'warn');
-      return { ok: false, reason: 'invalid-point', message };
-    }
+    const points = this.matchingSupplyPoints().map((point) => ({
+      ...point,
+      distance: bot.entity.position.distanceTo(new Vec3(point.x, point.y, point.z))
+    })).sort((a, b) => b.priority - a.priority || a.distance - b.distance);
+    if (!points.length) return { ok: false, reason: 'no-point', message: 'no enabled supply point is configured for this dimension' };
+
     this.resupplyBusy = true;
-    let container = null;
+    let opened = 0;
     try {
-      await this.moveToBlock(block);
-      container = await bot.openContainer(block);
-      for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
-        try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
+      for (const point of points) {
+        for (const containerPosition of this.supplyContainers(point)) {
+          if (!bot.entity) break;
+          const block = bot.blockAt(new Vec3(containerPosition.x, containerPosition.y, containerPosition.z));
+          if (!block || !isRegionContainerName(block.name)) {
+            this.log(`Configured supply container is unavailable at ${containerPosition.x},${containerPosition.y},${containerPosition.z}.`, 'warn');
+            continue;
+          }
+          let container = null;
+          try {
+            await this.moveToBlock(block, 'supply');
+            container = await bot.openContainer(block);
+            opened += 1;
+            if (containerPosition.role !== 'pickup') {
+              for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
+                try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
+              }
+            }
+            if (containerPosition.role !== 'storage') {
+              const contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
+              const pickaxe = contents.find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+              const food = contents.find((item) => this.isFoodItem(item));
+              if (needPickaxe && !this.hasUsablePickaxe() && pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
+              if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item)) && food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
+            }
+            contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
+            const readyPickaxe = !needPickaxe || this.hasUsablePickaxe();
+            const readyFood = !needFood || bot.inventory.items().some((item) => this.isFoodItem(item));
+            if (readyPickaxe && readyFood && bot.inventory.emptySlotCount() > 2) {
+              this.log(`Resupply completed at ${point.name}.`);
+              return { ok: true, reason: 'completed', message: `resupply completed at ${point.name}` };
+            }
+          } catch (error) {
+            this.log(`Supply container operation failed at ${containerPosition.x},${containerPosition.y},${containerPosition.z}: ${error.message}`, 'warn');
+          } finally {
+            if (container) {
+              try { await container.close(); } catch (_) {}
+            }
+          }
+        }
       }
-      const contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
-      const pickaxe = contents.find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
-      const food = contents.find((item) => this.isFoodItem(item));
-      if (needPickaxe && !this.hasUsablePickaxe() && pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
-      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item)) && food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
       const missing = [];
       if (needPickaxe && !this.hasUsablePickaxe()) missing.push('usable pickaxe');
       if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item))) missing.push('food');
-      if (missing.length) return { ok: false, reason: 'stock-empty', message: `nearest supply container has no ${missing.join(' or ')}` };
-      this.log('Resupply completed from configured point.');
-      return { ok: true, reason: 'completed', message: 'resupply completed' };
-    } catch (error) {
-      this.log(`Resupply failed: ${error.message}`, 'warn');
-      return { ok: false, reason: 'operation-failed', message: error.message };
+      if (missing.length) return { ok: false, reason: 'stock-empty', message: `configured supply points have no ${missing.join(' or ')}` };
+      return { ok: false, reason: opened ? 'inventory-full' : 'invalid-point', message: opened ? 'supplies are present but inventory remains full' : 'no configured supply container could be opened' };
     } finally {
-      if (container) {
-        try { await container.close(); } catch (_) {}
-      }
       this.resupplyBusy = false;
     }
   }
@@ -1238,21 +1423,23 @@ class ManagedBot extends EventEmitter {
     return { ok: true, message: `Equipping ${item.name}.` };
   }
 
-  setSupply(mode = 'on') {
+  setSupply(mode = 'on', announce = true) {
     const normalized = String(mode || 'on').toLowerCase();
     if (['off', 'stop', 'disable'].includes(normalized)) {
       this.supply = false;
       if (this.supplyTimer) clearTimeout(this.supplyTimer);
       this.supplyTimer = null;
       if (this.bot?.autoEat?.disable) this.bot.autoEat.disable();
-      return this.respond(`[${this.bot.username}] Supply management disabled.`);
+      const message = `[${this.bot?.username || this.displayName}] Supply management disabled.`;
+      return announce ? this.respond(message) : { ok: true, message };
     }
     const wasEnabled = this.supply;
     this.supply = true;
     if (this.bot?.autoEat?.enable) this.bot.autoEat.enable();
     this.log('Supply and equipment management enabled.');
     if (!wasEnabled) this.supplyLoop();
-    return this.respond(`[${this.bot.username}] Supply management enabled.`);
+    const message = `[${this.bot?.username || this.displayName}] Supply management enabled.`;
+    return announce ? this.respond(message) : { ok: true, message };
   }
 
   async supplyLoop() {
@@ -1271,13 +1458,24 @@ class ManagedBot extends EventEmitter {
 
   stationaryAttack() {
     const bot = this.bot;
-    if (!bot?.entity || this.digging || this.resupplyBusy || bot.isSleeping) return;
+    if (!bot?.entity || this.digging || this.resupplyBusy || bot.isSleeping || this.taskScheduler.isBlocked('combat')) return;
     const entity = bot.nearestEntity((candidate) => this.definition.targetMobs.includes(candidate.name) && candidate.position.distanceTo(bot.entity.position) < 3.5);
     if (!entity) return;
     const sword = bot.inventory.items().find((item) => item.name.includes('sword'));
     if (sword) bot.equip(sword, 'hand').catch(() => {});
     bot.lookAt(entity.position.offset(0, entity.height * 0.7, 0)).catch(() => {});
     bot.attack(entity);
+  }
+
+  activeSkillKeys() {
+    const active = [];
+    if (this.killAuraEnabled) active.push('combat');
+    if (this.fishing) active.push('fishing');
+    if (this.mining || this.regionMining) active.push('mining');
+    if (this.supply) active.push('supply');
+    if (this.sleepEnabled || this.resupplyEnabled) active.push('survival');
+    if (this.chatLogEnabled) active.push('chat-command');
+    return active;
   }
 
   publicStatus() {
@@ -1317,6 +1515,9 @@ class ManagedBot extends EventEmitter {
         lastBlock: this.regionPlan.lastBlock
       } : null,
       resupplyPoints: this.resupplyPoints,
+      skills: this.effectiveSkillConfig(),
+      activeSkills: this.activeSkillKeys(),
+      scheduler: this.taskScheduler.status(),
       skinIdentifier: this.bot?.username || this.definition.skinUsername || this.skinCache?.status(this.id).username || (!String(this.definition.username || '').includes('@') ? this.definition.username : this.definition.id),
       skin: this.skinCache ? {
         avatarUrl: `/api/skins/${encodeURIComponent(this.id)}/avatar`,

@@ -5,6 +5,18 @@ const ROOT_DIR = path.resolve(__dirname, '../../../..');
 const CONFIG_DIR = path.join(ROOT_DIR, 'config');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 
+const SKILL_KEYS = ['combat', 'fishing', 'pathfinder', 'mining', 'supply', 'survival', 'chat-command', 'openai-tools'];
+const DEFAULT_SKILL_PRIORITIES = {
+  combat: 55,
+  fishing: 20,
+  pathfinder: 30,
+  mining: 45,
+  supply: 85,
+  survival: 75,
+  'chat-command': 10,
+  'openai-tools': 1
+};
+
 function readJson(filePath, fallback) {
   if (!fs.existsSync(filePath)) return fallback;
   try {
@@ -12,6 +24,59 @@ function readJson(filePath, fallback) {
   } catch (error) {
     throw new Error(`Invalid JSON in ${filePath}: ${error.message}`);
   }
+}
+
+function normalizeSkillSettings(base = {}, override = {}) {
+  const result = {};
+  for (const key of SKILL_KEYS) {
+    const inherited = base?.[key] || {};
+    const requested = override?.[key] || {};
+    result[key] = {
+      enabled: requested.enabled === undefined ? (inherited.enabled === undefined ? key === 'chat-command' : Boolean(inherited.enabled)) : requested.enabled === true,
+      priority: Number.isFinite(Number(requested.priority)) ? Number(requested.priority) : (Number.isFinite(Number(inherited.priority)) ? Number(inherited.priority) : DEFAULT_SKILL_PRIORITIES[key])
+    };
+  }
+  return result;
+}
+
+function coordinate(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeCoordinateObject(value) {
+  if (!value || typeof value !== 'object') return null;
+  const x = coordinate(value.x);
+  const y = coordinate(value.y);
+  const z = coordinate(value.z);
+  return [x, y, z].every(Number.isFinite) ? { x, y, z } : null;
+}
+
+function normalizeSupplyPoint(point, index = 0) {
+  if (!point || typeof point !== 'object') return null;
+  const rawContainers = Array.isArray(point.containers) ? point.containers : [];
+  const containers = rawContainers.map((container) => {
+    const position = normalizeCoordinateObject(container);
+    if (!position) return null;
+    const role = ['storage', 'pickup', 'mixed'].includes(String(container.role || '').toLowerCase()) ? String(container.role).toLowerCase() : 'mixed';
+    return { ...position, role };
+  }).filter(Boolean);
+  const legacyPosition = normalizeCoordinateObject(point);
+  if (!containers.length && legacyPosition) containers.push({ ...legacyPosition, role: 'mixed' });
+  const anchor = legacyPosition || containers[0] || null;
+  if (!anchor) return null;
+  return {
+    id: String(point.id || `point-${index + 1}`).trim() || `point-${index + 1}`,
+    name: String(point.name || `补给点 ${index + 1}`).trim() || `补给点 ${index + 1}`,
+    dimension: point.dimension ? String(point.dimension).replace(/^minecraft:/, '').trim() : null,
+    x: anchor.x,
+    y: anchor.y,
+    z: anchor.z,
+    bed: normalizeCoordinateObject(point.bed),
+    containers,
+    enabled: point.enabled !== false,
+    priority: Number.isFinite(Number(point.priority)) ? Number(point.priority) : 0
+  };
 }
 
 function normalizeBotDefinition(bot, defaults = {}, index = 0) {
@@ -34,7 +99,8 @@ function normalizeBotDefinition(bot, defaults = {}, index = 0) {
       ...(bot.viewer || {})
     },
     commandWhitelist: Array.isArray(bot.commandWhitelist) ? [...new Set(bot.commandWhitelist.map((name) => String(name).trim()).filter(Boolean))] : null,
-    resupplyPoints: Array.isArray(bot.resupplyPoints) ? bot.resupplyPoints.map((point) => ({ x: Number(point.x), y: Number(point.y), z: Number(point.z) })).filter((point) => [point.x, point.y, point.z].every(Number.isFinite)) : []
+    resupplyPoints: Array.isArray(bot.resupplyPoints) ? bot.resupplyPoints.map(normalizeSupplyPoint).filter(Boolean) : [],
+    skills: bot.skills && typeof bot.skills === 'object' ? normalizeSkillSettings(defaults.skills, bot.skills) : null
   };
 
   if (!definition.id) throw new Error(`Bot at index ${index} needs a non-empty id.`);
@@ -79,6 +145,7 @@ function loadConfig() {
     targetMobs: ['zombified_piglin', 'wither_skeleton', 'zombie', 'skeleton', 'spider', 'creeper'],
     ...(raw.defaults || {})
   };
+  defaults.skills = normalizeSkillSettings(defaults.skills);
 
   const bots = validateBotDefinitions(raw.bots.map((bot, index) => normalizeBotDefinition(bot, defaults, index)));
   const ids = new Set(bots.map((bot) => bot.id));
@@ -119,8 +186,10 @@ module.exports = {
   loadConfig,
   authCachePath,
   normalizeBotDefinition,
+  normalizeSkillSettings,
+  normalizeSupplyPoint,
   validateBotDefinitions,
   readJson,
-  ROOT_DIR
+  ROOT_DIR,
+  SKILL_KEYS
 };
-

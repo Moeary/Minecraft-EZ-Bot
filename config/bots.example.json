@@ -18,7 +18,17 @@
       "skeleton",
       "spider",
       "creeper"
-    ]
+    ],
+    "skills": {
+      "combat": { "enabled": false, "priority": 55 },
+      "fishing": { "enabled": false, "priority": 20 },
+      "pathfinder": { "enabled": false, "priority": 30 },
+      "mining": { "enabled": false, "priority": 45 },
+      "supply": { "enabled": false, "priority": 85 },
+      "survival": { "enabled": false, "priority": 75 },
+      "chat-command": { "enabled": true, "priority": 10 },
+      "openai-tools": { "enabled": false, "priority": 10 }
+    }
   },
   "bots": [
     {

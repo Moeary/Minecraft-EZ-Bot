@@ -4,6 +4,8 @@ import {
   botAction,
   createBot,
   configureRegion,
+  configureSupply,
+  copySkills,
   deleteBot,
   fetchBots,
   fetchConfig,
@@ -13,8 +15,13 @@ import {
   sendCommand,
   setViewerPerspective,
   updateBot,
+  updateSkills,
   type BotDefinition,
   type BotStatus,
+  type SkillOverview,
+  type SkillKey,
+  type SkillSettings,
+  type SupplyPoint,
   type LogEntry,
   type WebConfig
 } from './api';
@@ -143,6 +150,7 @@ function App() {
   const [form, setForm] = useState<BotForm>(emptyForm);
   const [previewMode, setPreviewMode] = useState<'status' | 'viewer'>('status');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [skillOverview, setSkillOverview] = useState<SkillOverview | null>(null);
   const [skillModalKey, setSkillModalKey] = useState<string | null>(null);
 
   const selected = useMemo(() => bots.find((bot) => bot.id === selectedId) || bots[0], [bots, selectedId]);
@@ -168,6 +176,7 @@ function App() {
     setDefinitions(config.bots);
     setWebConfig(config.web);
     setWhitelist(nextWhitelist);
+    setSkillOverview(config.skills || null);
   }, [selectedId]);
 
   useEffect(() => {
@@ -254,7 +263,7 @@ function App() {
         <div className="page-content">
           {view === 'overview' && <Overview bots={bots} onlineCount={onlineCount} activeCount={activeCount} selected={selected} selectBot={selectBot} setView={setView} logs={logs} webConfig={webConfig} />}
           {view === 'bots' && <BotManagement bots={bots} selectedIds={selectedIds} toggleSelection={toggleSelection} selectAll={() => setSelectedIds(selectedIds.length === bots.length ? [] : bots.map((bot) => bot.id))} setSelectedIds={setSelectedIds} run={run} openAdd={openAdd} openEdit={openEdit} selected={selected} deleteBot={deleteBot} setSelectedId={setSelectedId} whitelist={whitelist} saveWhitelist={saveSelectedWhitelist} />}
-          {view === 'skills' && <SkillsPage bots={bots} selected={selected} onOpenSkill={setSkillModalKey} />}
+          {view === 'skills' && <SkillsPage bots={bots} selected={selected} skillOverview={skillOverview} onOpenSkill={setSkillModalKey} run={run} />}
           {view === 'detail' && selected && <DetailPage bots={bots} onSelectBot={setSelectedId} selected={selected} selectedDefinition={selectedDefinition} logs={logs.filter((log) => log.botId === selected.id)} command={command} setCommand={setCommand} submitCommand={submitCommand} run={run} previewMode={previewMode} setPreviewMode={setPreviewMode} viewerUrl={viewerUrl} openEdit={openEdit} />}
           {view === 'detail' && !selected && <EmptyState openAdd={openAdd} />}
         </div>
@@ -320,13 +329,31 @@ const skillGuides: Record<string, { examples: string[]; notes: string[]; next: s
   'openai-tools': { examples: ['暂未启用游戏内喊话'], notes: ['当前只展示工具声明和审批边界，不会调用模型。', '后续启用前会增加逐次确认和可撤销操作。'], next: ['自然语言任务规划', '工具调用审批中心'] }
 };
 
-function SkillsPage({ bots, selected, onOpenSkill }: { bots: BotStatus[]; selected?: BotStatus; onOpenSkill: (key: string) => void }) {
-  return <><div className="page-heading compact"><div><span className="eyebrow">AUTOMATION / SKILLS</span><h1>技能中心</h1><p>每项技能都是独立模块，声明指令、能力边界与未来的 OpenAI 工具链。</p></div><span className="soft-badge large">8 个技能模块</span></div><div className="skills-notice"><div className="notice-icon">✦</div><div><strong>模块化设计已就绪</strong><p>后续新增技能只需在 <code>apps/server/src/core/skills/</code> 添加独立 JS 文件，再注册到技能目录。</p></div><span className="status-chip">对话功能暂未启用</span></div><div className="skills-grid">{skills.map((skill) => <article className="skill-card" key={skill.key}><div className="skill-card-top"><span className="skill-icon">{skill.icon}</span><span className="status-chip">{skill.status}</span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-commands">{skill.commands.map((command) => <code key={command}>{command}</code>)}</div><div className="skill-card-foot"><span>模块文件</span><strong>{skill.key}.js</strong><button className="icon-button" title="查看使用方法" onClick={() => onOpenSkill(skill.key)}>↗</button></div></article>)}</div></>;
+function SkillsPage({ bots, selected, skillOverview, onOpenSkill, run }: { bots: BotStatus[]; selected?: BotStatus; skillOverview: SkillOverview | null; onOpenSkill: (key: string) => void; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
+  return <><div className="page-heading compact"><div><span className="eyebrow">AUTOMATION / SKILLS</span><h1>技能中心</h1><p>每项技能都是独立模块，声明指令、能力边界与未来的 OpenAI 工具链。</p></div><span className="soft-badge large">8 个技能模块</span></div><SkillSettingsPanel bots={bots} selected={selected} overview={skillOverview} run={run} /><div className="skills-notice"><div className="notice-icon">✦</div><div><strong>模块化设计已就绪</strong><p>后续新增技能只需在 <code>apps/server/src/core/skills/</code> 添加独立 JS 文件，再注册到技能目录。</p></div><span className="status-chip">对话功能暂未启用</span></div><div className="skills-grid">{skills.map((skill) => { const enabledCount = bots.filter((bot) => bot.skills?.[skill.key as SkillKey]?.enabled).length; return <article className="skill-card" key={skill.key}><div className="skill-card-top"><span className="skill-icon">{skill.icon}</span><span className="status-chip">{enabledCount ? `${enabledCount} 个机器人启用` : skill.status}</span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-commands">{skill.commands.map((command) => <code key={command}>{command}</code>)}</div><div className="skill-card-foot"><span>模块文件</span><strong>{skill.key}.js</strong><button className="icon-button" title="查看使用方法" onClick={() => onOpenSkill(skill.key)}>↗</button></div></article>; })}</div></>;
+}
+
+const defaultSkillSettings = (): SkillSettings => ({
+  combat: { enabled: false, priority: 55 }, fishing: { enabled: false, priority: 20 }, pathfinder: { enabled: false, priority: 30 }, mining: { enabled: false, priority: 45 }, supply: { enabled: false, priority: 85 }, survival: { enabled: false, priority: 75 }, 'chat-command': { enabled: true, priority: 10 }, 'openai-tools': { enabled: false, priority: 1 }
+});
+
+function SkillSettingsPanel({ bots, selected, overview, run }: { bots: BotStatus[]; selected?: BotStatus; overview: SkillOverview | null; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
+  const [scope, setScope] = useState<'global' | 'bot'>('bot');
+  const [botId, setBotId] = useState(selected?.id || bots[0]?.id || '');
+  const [settings, setSettings] = useState<SkillSettings>(overview?.global || defaultSkillSettings());
+  useEffect(() => {
+    const next = scope === 'global' ? overview?.global : bots.find((bot) => bot.id === botId)?.skills;
+    if (next) setSettings(next);
+  }, [scope, botId, overview]);
+  const update = <K extends SkillKey>(key: K, field: 'enabled' | 'priority', value: boolean | number) => setSettings((current) => ({ ...current, [key]: { ...current[key], [field]: value } }));
+  const save = async () => await run(() => updateSkills(scope, settings, scope === 'bot' ? botId : undefined), true);
+  const copy = async () => { if (scope !== 'bot' || !botId) return; await run(() => copySkills(botId, bots.filter((bot) => bot.id !== botId).map((bot) => bot.id)), true); };
+  return <section className="card skill-settings-panel"><div className="card-header"><div><span className="eyebrow">SKILL POLICY / RUNTIME</span><h3>技能开关与任务优先级</h3><p className="muted">全局设置作为默认值；单机器人设置会覆盖全局。高优先级任务会先获得移动与交互锁。</p></div><span className="soft-badge">可复制配置</span></div><div className="skill-policy-toolbar"><div className="mode-switch"><button type="button" className={scope === 'global' ? 'active' : ''} onClick={() => setScope('global')}>全局默认</button><button type="button" className={scope === 'bot' ? 'active' : ''} onClick={() => setScope('bot')}>单机器人</button></div>{scope === 'bot' && <select value={botId} onChange={(event) => setBotId(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select>}<button type="button" className="primary" onClick={save}>保存技能配置</button>{scope === 'bot' && <button type="button" className="secondary" onClick={copy}>复制给其他机器人</button>}</div><div className="skill-policy-grid">{skills.map((skill) => { const key = skill.key as SkillKey; return <label className="skill-policy-row" key={skill.key}><span className="skill-policy-name"><b>{skill.icon}</b>{skill.name}</span><input type="checkbox" checked={settings[key]?.enabled || false} onChange={(event) => update(key, 'enabled', event.target.checked)} /><span>启用</span><input className="priority-input" type="number" min="1" max="100" value={settings[key]?.priority ?? 1} onChange={(event) => update(key, 'priority', Number(event.target.value))} /><small>优先级</small></label>; })}</div><div className="bot-skill-status"><strong>当前机器人运行状态</strong>{bots.map((bot) => { const enabled = (Object.keys(bot.skills || {}) as SkillKey[]).filter((key) => bot.skills?.[key]?.enabled); return <div key={bot.id} className="bot-skill-status-row"><span>{bot.displayName}</span><div><small>已启用：</small>{enabled.length ? enabled.map((key) => <code key={`enabled-${key}`}>{key}</code>) : <em>无</em>}<small> · 运行中：</small>{bot.activeSkills.length ? bot.activeSkills.map((key) => <code key={`active-${key}`}>{key}</code>) : <em>无</em>}</div><small>{bot.scheduler?.active ? `调度中：${bot.scheduler.active}` : '调度器空闲'}</small></div>; })}</div></section>;
 }
 
 function SkillGuideModal({ skill, bots, selected, run, onClose }: { skill: typeof skills[number]; bots: BotStatus[]; selected?: BotStatus; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void>; onClose: () => void }) {
   const guide = skillGuides[skill.key] || { examples: [], notes: [], next: [] };
-  return <div className="editor-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><div className="editor-modal skill-guide-modal" role="dialog" aria-modal="true" aria-labelledby="skill-guide-title"><div className="drawer-head"><div><span className="eyebrow">SKILL GUIDE / {skill.key}.js</span><h2 id="skill-guide-title">{skill.name} · 怎么使用</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><p className="modal-intro">{skill.description}</p>{skill.key === 'mining' ? <MiningSkillSettings bots={bots} selected={selected} run={run} /> : <><section><h3>游戏中怎么喊话</h3><div className="chat-examples">{guide.examples.map((example) => <code className="chat-example" key={example}>{example}</code>)}</div><p className="muted">在 Minecraft 聊天框直接输入即可。建议使用“机器人名 + 指令”，例如 <code>Shinano kill on</code>；指令仍会受该机器人的独立白名单保护。</p></section><section><h3>使用建议</h3><ul className="guide-list">{guide.notes.map((note) => <li key={note}>{note}</li>)}</ul></section><section><h3>下一轮候选技能（本轮不启用）</h3><ul className="guide-list skill-next-list">{guide.next.map((item) => <li key={item}>{item}</li>)}</ul></section></>}<div className="drawer-actions"><button type="button" className="primary" onClick={onClose}>知道了</button></div></div></div>;
+  return <div className="editor-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><div className="editor-modal skill-guide-modal" role="dialog" aria-modal="true" aria-labelledby="skill-guide-title"><div className="drawer-head"><div><span className="eyebrow">SKILL GUIDE / {skill.key}.js</span><h2 id="skill-guide-title">{skill.name} · 怎么使用</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><p className="modal-intro">{skill.description}</p>{skill.key === 'mining' ? <MiningSkillSettings bots={bots} selected={selected} run={run} /> : skill.key === 'supply' || skill.key === 'survival' ? <SupplySkillSettings bots={bots} selected={selected} run={run} /> : <><section><h3>游戏中怎么喊话</h3><div className="chat-examples">{guide.examples.map((example) => <code className="chat-example" key={example}>{example}</code>)}</div><p className="muted">在 Minecraft 聊天框直接输入即可。建议使用“机器人名 + 指令”，例如 <code>Shinano kill on</code>；指令仍会受该机器人的独立白名单保护。</p></section><section><h3>使用建议</h3><ul className="guide-list">{guide.notes.map((note) => <li key={note}>{note}</li>)}</ul></section><section><h3>下一轮候选技能（本轮不启用）</h3><ul className="guide-list skill-next-list">{guide.next.map((item) => <li key={item}>{item}</li>)}</ul></section></>}<div className="drawer-actions"><button type="button" className="primary" onClick={onClose}>知道了</button></div></div></div>;
 }
 
 function MiningSkillSettings({ bots, selected, run }: { bots: BotStatus[]; selected?: BotStatus; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
@@ -360,6 +387,32 @@ function MiningSkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
     await run(() => configureRegion(botId, { x1: values[0], y1: values[1], z1: values[2], x2: values[3], y2: values[4], z2: values[5], mode, allow: allow.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean), deny: deny.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean) }), true);
   }
   return <section className="mining-settings"><div className="settings-heading"><div><span className="eyebrow">WEB CONFIGURATION</span><h3>区域挖矿设置</h3></div><span className="soft-badge">容器、基岩、流体始终保护</span></div><label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label><label>两个角点 <input value={coordinates} onChange={(event) => setCoordinates(event.target.value)} placeholder="x1, y1, z1, x2, y2, z2" /></label><div className="mode-switch"><button type="button" className={mode === 'blacklist' ? 'active' : ''} onClick={() => setMode('blacklist')}>黑名单：挖除未列出的方块</button><button type="button" className={mode === 'whitelist' ? 'active' : ''} onClick={() => setMode('whitelist')}>白名单：只挖列出的方块</button></div><label>{mode === 'whitelist' ? '允许挖掘的方块' : '禁止挖掘的方块'}<input value={mode === 'whitelist' ? allow : deny} onChange={(event) => mode === 'whitelist' ? setAllow(event.target.value) : setDeny(event.target.value)} placeholder="例如 chest, barrel, diamond_ore" /></label><p className="muted">多个值用逗号或空格分隔。保存后游戏内只需使用 <code>area on</code> / <code>area off</code>，不必手动拼接长指令。{currentBot?.region?.pausedReason ? ` 当前暂停：${currentBot.region.pausedReason}` : ''}</p>{error && <p className="form-error">{error}</p>}<button type="button" className="primary" disabled={!botId} onClick={save}>保存区域配置</button></section>;
+}
+
+function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selected?: BotStatus; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
+  const [botId, setBotId] = useState(selected?.id || bots[0]?.id || '');
+  const currentBot = bots.find((bot) => bot.id === botId) || selected;
+  const [points, setPoints] = useState<SupplyPoint[]>(currentBot?.resupplyPoints || []);
+  const [name, setName] = useState('主基地补给点');
+  const [dimension, setDimension] = useState('overworld');
+  const [anchor, setAnchor] = useState('0, 64, 0');
+  const [bed, setBed] = useState('');
+  const [containers, setContainers] = useState('0, 64, 0, mixed');
+  const [error, setError] = useState('');
+  function selectBot(id: string) { setBotId(id); setPoints(bots.find((bot) => bot.id === id)?.resupplyPoints || []); }
+  function parseCoordinate(value: string) { const values = value.split(/[,\t\s]+/).map(Number); return values.length === 3 && values.every(Number.isFinite) ? { x: values[0], y: values[1], z: values[2] } : null; }
+  function addPoint() {
+    const position = parseCoordinate(anchor);
+    if (!position) { setError('补给点坐标必须是 3 个数字。'); return; }
+    const bedPosition = bed.trim() ? parseCoordinate(bed) : null;
+    if (bed.trim() && !bedPosition) { setError('床坐标必须是 3 个数字。'); return; }
+    const parsedContainers = containers.split(/\n+/).map((line) => line.trim()).filter(Boolean).map((line) => { const values = line.split(/[,\t\s]+/); const point = parseCoordinate(values.slice(0, 3).join(',')); return point ? { ...point, role: (['storage', 'pickup', 'mixed'].includes(values[3]) ? values[3] : 'mixed') as 'storage' | 'pickup' | 'mixed' } : null; }).filter((value): value is SupplyPoint['containers'][number] => Boolean(value));
+    if (!parsedContainers.length) { setError('至少配置一个箱子/容器坐标。'); return; }
+    setPoints((current) => [...current, { id: `point-${Date.now()}`, name, dimension: dimension || null, ...position, bed: bedPosition, containers: parsedContainers, enabled: true, priority: 0 }]);
+    setError('');
+  }
+  async function save() { if (!botId) return; await run(() => configureSupply(botId, points), true); }
+  return <section className="supply-settings"><div className="settings-heading"><div><span className="eyebrow">SUPPLY STATION</span><h3>固定补给点</h3></div><span className="soft-badge">只访问这里的床与容器</span></div><label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label><div className="form-grid"><label>补给点名称<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>维度<select value={dimension} onChange={(event) => setDimension(event.target.value)}><option value="overworld">主世界</option><option value="the_nether">下界</option><option value="the_end">末地</option></select></label><label>锚点坐标<input value={anchor} onChange={(event) => setAnchor(event.target.value)} placeholder="x, y, z" /></label><label>床坐标（可选）<input value={bed} onChange={(event) => setBed(event.target.value)} placeholder="x, y, z" /></label></div><label>容器坐标（每行一个：x, y, z, storage|pickup|mixed）<textarea value={containers} onChange={(event) => setContainers(event.target.value)} rows={3} /></label><div className="drawer-actions"><button type="button" className="secondary" onClick={addPoint}>加入补给点列表</button><button type="button" className="primary" onClick={save}>保存补给点</button></div>{error && <p className="form-error">{error}</p>}<div className="point-list">{points.length ? points.map((point) => <div className="point-row" key={point.id}><div><strong>{point.name}</strong><small>{point.dimension || '任意维度'} · {point.x}, {point.y}, {point.z} · {point.containers.length} 个容器{point.bed ? ' · 已配置床' : ''}</small></div><button type="button" className="icon-button" onClick={() => setPoints((current) => current.filter((item) => item.id !== point.id))}>×</button></div>) : <p className="muted">还没有固定补给点。未配置时机器人不会随机寻找箱子或床。</p>}</div></section>;
 }
 
 function FirstPersonControls({ botId, run }: { botId: string; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {

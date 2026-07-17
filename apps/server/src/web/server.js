@@ -83,9 +83,21 @@ function createWebServer(manager) {
             port: manager.config.web.port,
             viewerPortStart: manager.config.web.viewerPortStart,
             allowRawCommands: manager.config.web.allowRawCommands
-          }
+          },
+          defaults: { skills: manager.config.defaults.skills },
+          skills: manager.skillSettings()
         });
       }
+      if (pathname === '/api/skills' && request.method === 'GET') return json(response, 200, manager.skillSettings());
+      if (pathname === '/api/skills' && request.method === 'PUT') {
+        const body = await parseBody(request);
+        return sendResult(response, manager.updateSkills(body.scope, body.botId, body.skills));
+      }
+      if (pathname === '/api/skills/copy' && request.method === 'POST') {
+        const body = await parseBody(request);
+        return sendResult(response, manager.copySkills(body.sourceBotId, Array.isArray(body.targetBotIds) ? body.targetBotIds : []));
+      }
+
       if (pathname === '/api/whitelist' && request.method === 'GET') {
         const botId = url.searchParams.get('botId');
         const runtime = botId ? manager.get(botId) : null;
@@ -104,7 +116,7 @@ function createWebServer(manager) {
         return json(response, 200, manager.batch(body.action, Array.isArray(body.ids) ? body.ids : []));
       }
 
-      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective|region))?$/);
+      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective|region|supply))?$/);
       if (match) {
         const id = decodeURIComponent(match[1]);
         const action = match[2];
@@ -123,6 +135,10 @@ function createWebServer(manager) {
         }
         if (request.method === 'PUT' && action === 'region') {
           return sendResult(response, manager.configureRegion(id, await parseBody(request)));
+        }
+        if (request.method === 'PUT' && action === 'supply') {
+          const body = await parseBody(request);
+          return sendResult(response, manager.configureSupply(id, body.points));
         }
         if (request.method === 'POST' && action === 'command') {
           const body = await parseBody(request);

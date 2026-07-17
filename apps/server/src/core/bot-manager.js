@@ -1,7 +1,7 @@
 const EventEmitter = require('node:events');
 const { ManagedBot } = require('./managed-bot');
 const { SkinCache } = require('./skin-cache');
-const { loadConfig, normalizeBotDefinition, validateBotDefinitions } = require('../config/load-config');
+const { loadConfig, normalizeBotDefinition, normalizeSkillSettings, validateBotDefinitions } = require('../config/load-config');
 const { saveBotsConfig, saveWhitelist } = require('../config/config-store');
 
 class BotManager extends EventEmitter {
@@ -60,7 +60,8 @@ class BotManager extends EventEmitter {
       version: bot.version || '',
       viewer: { ...bot.viewer },
       commandWhitelist: bot.commandWhitelist ? [...bot.commandWhitelist] : null,
-      resupplyPoints: bot.resupplyPoints ? bot.resupplyPoints.map((point) => ({ ...point })) : []
+      resupplyPoints: bot.resupplyPoints ? bot.resupplyPoints.map((point) => ({ ...point, containers: point.containers?.map((container) => ({ ...container })) || [], bed: point.bed ? { ...point.bed } : null })) : [],
+      skills: bot.skills ? normalizeSkillSettings(this.config.defaults.skills, bot.skills) : null
     }));
   }
 
@@ -220,6 +221,75 @@ class BotManager extends EventEmitter {
       this.config.bots = next;
       runtime.definition = next.find((bot) => bot.id === runtime.id);
       return { ...result, region: runtime.publicStatus().region };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  skillSettings() {
+    return {
+      global: normalizeSkillSettings(this.config.defaults?.skills || {}),
+      bots: [...this.bots.values()].map((runtime) => ({
+        id: runtime.id,
+        displayName: runtime.displayName,
+        skills: runtime.effectiveSkillConfig(),
+        activeSkills: runtime.activeSkillKeys()
+      }))
+    };
+  }
+
+  updateSkills(scope, botId, settings) {
+    const normalizedScope = scope === 'global' ? 'global' : 'bot';
+    const normalized = normalizeSkillSettings(normalizedScope === 'global' ? this.config.defaults?.skills : this.config.defaults?.skills, settings || {});
+    try {
+      if (normalizedScope === 'global') {
+        this.config.defaults.skills = normalized;
+        saveBotsConfig(this.config, this.config.bots);
+        for (const runtime of this.bots.values()) {
+          if (!runtime.definition.skills) runtime.updateSkillConfig(normalized);
+        }
+        return { ok: true, message: 'Global skill settings saved.', scope: 'global', skills: normalized };
+      }
+      const runtime = this.get(botId);
+      if (!runtime) return { ok: false, message: `Unknown bot: ${botId}` };
+      const next = this.config.bots.map((bot) => bot.id === runtime.id ? { ...bot, skills: normalized } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      runtime.definition = next.find((bot) => bot.id === runtime.id);
+      runtime.updateSkillConfig(normalized);
+      return { ok: true, message: `${runtime.displayName} skill settings saved.`, scope: 'bot', botId: runtime.id, skills: normalized };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  copySkills(sourceBotId, targetBotIds = []) {
+    const source = this.get(sourceBotId);
+    if (!source) return { ok: false, message: `Unknown source bot: ${sourceBotId}` };
+    const targets = (Array.isArray(targetBotIds) && targetBotIds.length ? targetBotIds : [...this.bots.keys()]).filter((id) => id !== source.id);
+    const skills = source.effectiveSkillConfig();
+    const next = this.config.bots.map((bot) => targets.includes(bot.id) ? { ...bot, skills } : bot);
+    try {
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      for (const targetId of targets) {
+        const runtime = this.get(targetId);
+        if (!runtime) continue;
+        runtime.definition = next.find((bot) => bot.id === runtime.id) || runtime.definition;
+        runtime.updateSkillConfig(skills);
+      }
+      return { ok: true, message: `Copied skill settings to ${targets.length} bot(s).`, skills, targetBotIds: targets };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  configureSupply(id, points) {
+    const runtime = this.get(id);
+    if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
+    try {
+      const normalized = runtime.configureSupplyPoints(points);
+      return { ok: true, message: `${runtime.displayName} supply points saved.`, points: normalized };
     } catch (error) {
       return { ok: false, message: error.message };
     }
