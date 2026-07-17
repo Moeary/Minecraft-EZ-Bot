@@ -40,7 +40,8 @@ class BotManager extends EventEmitter {
       version: bot.definition.version || null,
       auth: bot.definition.auth || null,
       viewer: { ...bot.definition.viewer },
-      commandWhitelist: bot.definition.commandWhitelist ? [...bot.definition.commandWhitelist] : null
+      commandWhitelist: bot.definition.commandWhitelist ? [...bot.definition.commandWhitelist] : null,
+      resupplyPoints: bot.definition.resupplyPoints ? bot.definition.resupplyPoints.map((point) => ({ ...point })) : []
     }));
   }
 
@@ -56,7 +57,8 @@ class BotManager extends EventEmitter {
       auth: bot.auth || 'microsoft',
       version: bot.version || '',
       viewer: { ...bot.viewer },
-      commandWhitelist: bot.commandWhitelist ? [...bot.commandWhitelist] : null
+      commandWhitelist: bot.commandWhitelist ? [...bot.commandWhitelist] : null,
+      resupplyPoints: bot.resupplyPoints ? bot.resupplyPoints.map((point) => ({ ...point })) : []
     }));
   }
 

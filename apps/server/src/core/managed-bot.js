@@ -5,7 +5,46 @@ const autoEat = require('mineflayer-auto-eat').plugin;
 const pvp = require('mineflayer-pvp').plugin;
 const mineflayerViewer = require('prismarine-viewer').mineflayer;
 const minecraftData = require('minecraft-data');
+const { Vec3 } = require('vec3');
 const { authCachePath } = require('../config/load-config');
+const { saveBotsConfig } = require('../config/config-store');
+
+const MAX_REGION_VOLUME = 32768;
+const REGION_FLUIDS = new Set(['water', 'lava', 'flowing_water', 'flowing_lava']);
+const REGION_CONTAINER_NAMES = new Set([
+  'chest', 'trapped_chest', 'barrel', 'ender_chest', 'hopper', 'dispenser', 'dropper',
+  'furnace', 'blast_furnace', 'smoker', 'brewing_stand', 'spawner', 'trial_spawner', 'vault', 'crafter', 'decorated_pot', 'chiseled_bookshelf', 'shulker_box'
+]);
+const REGION_PROTECTED_NAMES = new Set([
+  'air', 'cave_air', 'void_air', 'bedrock', 'end_portal', 'end_portal_frame', 'nether_portal',
+  'command_block', 'chain_command_block', 'repeating_command_block', 'structure_block',
+  'jigsaw', 'barrier', 'light', 'reinforced_deepslate', 'respawn_anchor', 'beacon', 'conduit',
+  'enchanting_table', 'anvil', 'chipped_anvil', 'damaged_anvil', 'jukebox', 'note_block',
+  'crafting_table', 'white_bed', 'orange_bed', 'magenta_bed', 'light_blue_bed', 'yellow_bed',
+  'lime_bed', 'pink_bed', 'gray_bed', 'light_gray_bed', 'cyan_bed', 'purple_bed', 'blue_bed',
+  'brown_bed', 'green_bed', 'red_bed', 'black_bed', 'bed'
+]);
+const REGION_ALIASES = {
+  containers: [...REGION_CONTAINER_NAMES],
+  fluids: [...REGION_FLUIDS],
+  utility: [...REGION_CONTAINER_NAMES, 'crafting_table', 'enchanting_table', 'anvil', 'beacon'],
+  beds: [...REGION_PROTECTED_NAMES].filter((name) => name.endsWith('_bed') || name === 'bed')
+};
+const PLUG_BLOCK_NAMES = ['cobblestone', 'stone', 'deepslate', 'dirt', 'netherrack'];
+
+function cleanBlockName(name) {
+  return String(name || '').toLowerCase().replace(/^minecraft:/, '').trim();
+}
+
+function isRegionContainerName(name) {
+  const normalized = cleanBlockName(name);
+  return REGION_CONTAINER_NAMES.has(normalized) || normalized.endsWith('_shulker_box');
+}
+
+function isRegionProtectedName(name) {
+  const normalized = cleanBlockName(name);
+  return REGION_PROTECTED_NAMES.has(normalized) || isRegionContainerName(normalized);
+}
 
 class ManagedBot extends EventEmitter {
   constructor(config, botConfig) {
@@ -21,11 +60,23 @@ class ManagedBot extends EventEmitter {
     this.fishingTimer = null;
     this.miningTimer = null;
     this.supplyTimer = null;
+    this.regionTimer = null;
+    this.maintenanceTimer = null;
     this.killAuraEnabled = false;
     this.fishing = false;
     this.mining = false;
     this.supply = false;
     this.miningTarget = null;
+    this.regionPlan = null;
+    this.regionMining = false;
+    this.regionSeals = [];
+    this.sleepEnabled = false;
+    this.resupplyEnabled = false;
+    this.resupplyBusy = false;
+    this.maintenanceBusy = false;
+    this.digging = false;
+    this.navigationLock = Promise.resolve();
+    this.resupplyPoints = Array.isArray(botConfig.resupplyPoints) ? botConfig.resupplyPoints.map((point) => ({ x: Number(point.x), y: Number(point.y), z: Number(point.z) })).filter((point) => [point.x, point.y, point.z].every(Number.isFinite)) : [];
     this.supplyRole = 'auto';
     this.chatLogEnabled = false;
     this.viewerStarted = false;
@@ -79,6 +130,8 @@ class ManagedBot extends EventEmitter {
     delete options.authReconnectDelayMs;
     delete options.targetMobs;
     delete options.skinUsername;
+    delete options.commandWhitelist;
+    delete options.resupplyPoints;
     if (options.auth === 'microsoft') {
       options.onMsaCode = (data) => {
         const verification = data.verification_uri || data.verificationUri || 'https://www.microsoft.com/link';
@@ -116,6 +169,7 @@ class ManagedBot extends EventEmitter {
       this.setState('online');
       this.startViewer();
       this.startAttackLoop();
+      if (this.sleepEnabled || this.resupplyEnabled) this.startMaintenanceLoop();
       this.log('Ready for commands.');
     });
 
@@ -211,9 +265,16 @@ class ManagedBot extends EventEmitter {
     this.miningTimer = null;
     if (this.supplyTimer) clearTimeout(this.supplyTimer);
     this.supplyTimer = null;
+    if (this.regionTimer) clearTimeout(this.regionTimer);
+    this.regionTimer = null;
+    if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
+    this.maintenanceTimer = null;
     this.fishing = false;
     this.mining = false;
     this.supply = false;
+    this.regionMining = false;
+    this.digging = false;
+    if (this.regionPlan) this.regionPlan.active = false;
     this.miningTarget = null;
     if (this.bot?.autoEat?.disable) this.bot.autoEat.disable();
   }
@@ -239,7 +300,7 @@ class ManagedBot extends EventEmitter {
       return { command: tokens[1], args: tokens.slice(2) };
     }
 
-    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip']);
+    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip', 'area', 'region', 'minearea', 'sleep', 'resupply', 'unseal', 'look']);
     if (knownCommands.has(tokens[0].toLowerCase()) && this.isTarget(tokens[tokens.length - 1])) {
       return { command: tokens[0], args: tokens.slice(1, -1) };
     }
@@ -311,6 +372,11 @@ class ManagedBot extends EventEmitter {
     if (normalized === 'mine' || normalized === 'gather') return this.startMining(args);
     if (normalized === 'supply' || normalized === 'restock') return this.setSupply(args[0]);
     if (normalized === 'equip') return this.equipRole(args[0] || 'auto');
+    if (normalized === 'area' || normalized === 'region' || normalized === 'minearea') return this.executeRegionCommand(args);
+    if (normalized === 'sleep') return this.setSleepMode(args[0]);
+    if (normalized === 'resupply') return this.executeResupplyCommand(args);
+    if (normalized === 'unseal') return this.unsealFluids();
+    if (normalized === 'look') return this.lookCommand(args);
     return { ok: false, message: `Unknown command: ${normalized}` };
   }
 
@@ -382,6 +448,7 @@ class ManagedBot extends EventEmitter {
   }
 
   startMining(args = []) {
+    if (this.regionMining) return this.respond(`[${this.bot.username}] Region mining is active; stop it before starting targeted mining.`);
     if (this.mining) return this.respond(`[${this.bot.username}] Mining is already running.`);
     const target = this.resolveMiningTarget(args[0] || 'ores');
     if (!target.ids.length) return this.respond(`[${this.bot.username}] Unknown block target: ${args[0] || 'ores'}.`);
@@ -412,21 +479,523 @@ class ManagedBot extends EventEmitter {
         return;
       }
       const block = bot.blockAt(positions[0]);
-      if (!block || !bot.canDigBlock(block)) throw new Error('Target block is not diggable.');
-      const movements = new Movements(bot, minecraftData(bot.version));
-      movements.canDig = false;
-      bot.pathfinder.setMovements(movements);
-      await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
-      const tool = bot.pathfinder.bestHarvestTool(block);
+      if (!block) throw new Error('Target block is not loaded.');
+      await this.moveToBlock(block);
+      const current = bot.blockAt(block.position);
+      if (!current || !bot.canDigBlock(current)) throw new Error('Target block is not diggable from the current position.');
+      const tool = bot.pathfinder.bestHarvestTool(current);
       if (tool) await bot.equip(tool, 'hand');
-      await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
-      await bot.dig(block, true, 'raycast');
+      this.digging = true;
+      await bot.lookAt(current.position.offset(0.5, 0.5, 0.5));
+      await bot.dig(current, true, 'raycast');
+      this.digging = false;
       if (!this.mining || !this.miningTarget) return;
       this.miningTarget.mined += 1;
       this.miningTimer = setTimeout(() => this.miningLoop(), 250);
     } catch (error) {
+      this.digging = false;
       this.log(`Mining cycle failed: ${error.message}`, 'warn');
       if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 1800);
+    }
+  }
+
+  expandRegionBlockNames(values = []) {
+    const data = minecraftData(this.bot.version);
+    const names = [];
+    for (const value of values) {
+      const key = cleanBlockName(value);
+      const expanded = REGION_ALIASES[key] || [key];
+      for (const name of expanded) {
+        if (data.blocksByName[name] || isRegionProtectedName(name) || REGION_FLUIDS.has(name)) {
+          names.push(name);
+        }
+      }
+    }
+    return [...new Set(names)];
+  }
+
+  regionBoundsFromArgs(args) {
+    const numbers = args.slice(0, 6).map((value) => Number(value));
+    if (numbers.length !== 6 || numbers.some((value) => !Number.isInteger(value))) return null;
+    const [x1, y1, z1, x2, y2, z2] = numbers;
+    const bounds = {
+      minX: Math.min(x1, x2), maxX: Math.max(x1, x2),
+      minY: Math.min(y1, y2), maxY: Math.max(y1, y2),
+      minZ: Math.min(z1, z2), maxZ: Math.max(z1, z2)
+    };
+    const volume = (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1) * (bounds.maxZ - bounds.minZ + 1);
+    if (volume > MAX_REGION_VOLUME) return { error: `Region is too large (${volume} blocks). Maximum is ${MAX_REGION_VOLUME}.` };
+    return { bounds, volume };
+  }
+
+  executeRegionCommand(args = []) {
+    const action = String(args[0] || 'status').toLowerCase();
+    if (action === 'set') {
+      const parsed = this.regionBoundsFromArgs(args.slice(1));
+      if (!parsed || parsed.error) return this.respond(parsed?.error || 'Usage: area set <x1> <y1> <z1> <x2> <y2> <z2>');
+      this.regionPlan = {
+        bounds: parsed.bounds,
+        volume: parsed.volume,
+        mode: this.regionPlan?.mode || 'blacklist',
+        allow: this.regionPlan?.allow || [],
+        deny: this.regionPlan?.deny || [...REGION_PROTECTED_NAMES, ...REGION_FLUIDS, ...REGION_CONTAINER_NAMES, 'shulker_box'],
+        cursor: 0,
+        scanned: 0,
+        mined: 0,
+        active: false,
+        pausedReason: null,
+        lastBlock: null,
+        pending: null,
+        retryCount: 0,
+      };
+      return this.respond(`[${this.bot.username}] Region set: ${this.regionPlan.bounds.minX},${this.regionPlan.bounds.minY},${this.regionPlan.bounds.minZ} -> ${this.regionPlan.bounds.maxX},${this.regionPlan.bounds.maxY},${this.regionPlan.bounds.maxZ} (${parsed.volume} blocks).`);
+    }
+    if (!this.regionPlan) return this.respond(`[${this.bot.username}] Set a region first: area set <x1> <y1> <z1> <x2> <y2> <z2>`);
+    if (action === 'mode') {
+      const mode = String(args[1] || '').toLowerCase();
+      if (!['blacklist', 'whitelist'].includes(mode)) return this.respond(`[${this.bot.username}] Usage: area mode blacklist|whitelist`);
+      this.regionPlan.mode = mode;
+      return this.respond(`[${this.bot.username}] Region mode: ${mode}.`);
+    }
+    if (action === 'allow' || action === 'whitelist') {
+      const names = this.expandRegionBlockNames(args.slice(1));
+      if (!names.length) return this.respond(`[${this.bot.username}] Usage: area allow <block...>`);
+      this.regionPlan.allow = [...new Set([...this.regionPlan.allow, ...names])];
+      return this.respond(`[${this.bot.username}] Region allow list updated: ${this.regionPlan.allow.join(', ')}.`);
+    }
+    if (action === 'deny' || action === 'blacklist') {
+      const names = this.expandRegionBlockNames(args.slice(1));
+      if (!names.length) return this.respond(`[${this.bot.username}] Usage: area deny <block...>`);
+      this.regionPlan.deny = [...new Set([...this.regionPlan.deny, ...names])];
+      return this.respond(`[${this.bot.username}] Region deny list updated: ${this.regionPlan.deny.join(', ')}.`);
+    }
+    if (action === 'reset') {
+      this.regionPlan.mode = 'blacklist';
+      this.regionPlan.allow = [];
+      this.regionPlan.deny = [...REGION_PROTECTED_NAMES, ...REGION_FLUIDS, ...REGION_CONTAINER_NAMES, 'shulker_box'];
+      return this.respond(`[${this.bot.username}] Region filters reset to the safe blacklist.`);
+    }
+    if (action === 'start' || action === 'on') return this.startRegionMining();
+    if (action === 'stop' || action === 'off') return this.stopRegionMining();
+    if (action === 'status') return this.respond(this.regionStatusMessage());
+    return this.respond(`[${this.bot.username}] Usage: area set|mode|allow|deny|start|stop|status ...`);
+  }
+
+  regionStatusMessage() {
+    if (!this.regionPlan) return `[${this.bot.username}] No mining region configured.`;
+    const { bounds, mode, volume, cursor, scanned, mined, active, pausedReason } = this.regionPlan;
+    const progress = volume ? `${Math.min(100, Math.round((cursor / volume) * 100))}%` : '0%';
+    return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
+  }
+
+  startRegionMining() {
+    if (this.mining) return this.respond(`[${this.bot.username}] Targeted mining is active; stop it before starting region mining.`);
+    if (this.regionMining) return this.respond(`[${this.bot.username}] Region mining is already running.`);
+    if (!this.regionPlan) return this.respond(`[${this.bot.username}] Set a region first with area set.`);
+    if (this.regionPlan.mode === 'whitelist' && !this.regionPlan.allow.length) return this.respond(`[${this.bot.username}] Whitelist mode has no allowed blocks; refusing to start.`);
+    this.regionMining = true;
+    this.regionPlan.active = true;
+    this.regionPlan.pausedReason = null;
+    this.regionPlan.retryCount = 0;
+    this.log(`Region mining started (${this.regionPlan.mode}, ${this.regionPlan.volume} blocks).`);
+    this.respond(`[${this.bot.username}] Region mining started. Containers, fluids, bedrock and protected blocks remain untouched.`);
+    this.regionMiningLoop();
+    return { ok: true, message: 'Region mining started.' };
+  }
+
+  stopRegionMining() {
+    this.regionMining = false;
+    if (this.regionPlan) {
+      this.regionPlan.active = false;
+      this.regionPlan.pausedReason = 'stopped by operator';
+    }
+    if (this.regionTimer) clearTimeout(this.regionTimer);
+    this.regionTimer = null;
+    return this.respond(`[${this.bot.username}] Region mining stopped.`);
+  }
+
+  regionPositionAt(index) {
+    const bounds = this.regionPlan.bounds;
+    const width = bounds.maxX - bounds.minX + 1;
+    const depth = bounds.maxZ - bounds.minZ + 1;
+    const x = bounds.minX + (index % width);
+    const z = bounds.minZ + (Math.floor(index / width) % depth);
+    const y = bounds.minY + Math.floor(index / (width * depth));
+    return new Vec3(x, y, z);
+  }
+
+  isInsideRegion(position) {
+    const bounds = this.regionPlan?.bounds;
+    return Boolean(bounds && position.x >= bounds.minX && position.x <= bounds.maxX && position.y >= bounds.minY && position.y <= bounds.maxY && position.z >= bounds.minZ && position.z <= bounds.maxZ);
+  }
+
+  isRegionTarget(block) {
+    if (!block || !this.isInsideRegion(block.position)) return false;
+    const name = cleanBlockName(block.name);
+    if (!name || REGION_FLUIDS.has(name) || isRegionProtectedName(name)) return false;
+    if (this.regionPlan.mode === 'whitelist') return this.regionPlan.allow.includes(name);
+    return !this.regionPlan.deny.includes(name);
+  }
+
+  findRegionCandidate() {
+    const bot = this.bot;
+    const pendingPosition = this.regionPlan.pending ? new Vec3(this.regionPlan.pending.x, this.regionPlan.pending.y, this.regionPlan.pending.z) : null;
+    if (pendingPosition) {
+      const pendingBlock = bot.blockAt(pendingPosition);
+      if (this.isRegionTarget(pendingBlock)) return pendingBlock;
+      this.regionPlan.pending = null;
+      this.regionPlan.retryCount = 0;
+    }
+    const positions = bot.findBlocks({
+      matching: (block) => {
+        const name = cleanBlockName(block?.name);
+        if (!name || REGION_FLUIDS.has(name) || isRegionProtectedName(name)) return false;
+        return this.regionPlan.mode === 'whitelist' ? this.regionPlan.allow.includes(name) : !this.regionPlan.deny.includes(name);
+      },
+      maxDistance: 48,
+      count: 64
+    });
+    return positions.map((position) => bot.blockAt(position)).filter((block) => this.isRegionTarget(block)).sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] || null;
+  }
+
+  scanRegionCursor() {
+    if (this.regionPlan.pending) {
+      const pendingPosition = new Vec3(this.regionPlan.pending.x, this.regionPlan.pending.y, this.regionPlan.pending.z);
+      const pendingBlock = this.bot.blockAt(pendingPosition);
+      if (!pendingBlock) return { unloaded: pendingPosition };
+      if (this.isRegionTarget(pendingBlock)) return { block: pendingBlock };
+      this.regionPlan.pending = null;
+      this.regionPlan.retryCount = 0;
+    }
+    while (this.regionPlan.cursor < this.regionPlan.volume) {
+      const position = this.regionPositionAt(this.regionPlan.cursor);
+      const block = this.bot.blockAt(position);
+      if (!block) return { unloaded: position };
+      this.regionPlan.cursor += 1;
+      this.regionPlan.scanned += 1;
+      if (this.isRegionTarget(block)) {
+        this.regionPlan.pending = { x: position.x, y: position.y, z: position.z };
+        this.regionPlan.retryCount = 0;
+        return { block };
+      }
+    }
+    return { complete: true };
+  }
+
+  async moveToBlock(block) {
+    let release;
+    const previous = this.navigationLock;
+    this.navigationLock = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      const movements = new Movements(this.bot, minecraftData(this.bot.version));
+      movements.canDig = false;
+      this.bot.pathfinder.setMovements(movements);
+      await this.bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
+    } finally {
+      release();
+    }
+  }
+
+  getPlugItem() {
+    return this.bot.inventory.items().find((item) => PLUG_BLOCK_NAMES.includes(cleanBlockName(item.name)));
+  }
+
+  async sealFluidsAround(block) {
+    const directions = [
+      new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0),
+      new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)
+    ];
+    const plug = this.getPlugItem();
+    for (const direction of directions) {
+      const fluidPosition = block.position.plus(direction);
+      const fluid = this.bot.blockAt(fluidPosition);
+      if (!fluid || !REGION_FLUIDS.has(cleanBlockName(fluid.name))) continue;
+      if (this.regionSeals.some((seal) => seal.position.equals(fluidPosition))) continue;
+      if (!plug) {
+        this.regionPlan.pausedReason = `fluid at ${fluidPosition}; no plug blocks available`;
+        return false;
+      }
+      let placed = false;
+      for (const supportDirection of directions) {
+        const support = this.bot.blockAt(fluidPosition.minus(supportDirection));
+        if (!support || REGION_FLUIDS.has(cleanBlockName(support.name)) || ['air', 'cave_air', 'void_air'].includes(cleanBlockName(support.name))) continue;
+        try {
+          await this.bot.equip(plug, 'hand');
+          await this.bot.placeBlock(support, supportDirection);
+          this.regionSeals.push({ position: fluidPosition.clone(), blockName: plug.name, fluidName: fluid.name });
+          placed = true;
+          break;
+        } catch (error) {
+          this.log(`Could not seal ${fluid.name} at ${fluidPosition}: ${error.message}`, 'warn');
+        }
+      }
+      if (!placed) {
+        this.regionPlan.pausedReason = `could not safely seal fluid at ${fluidPosition}`;
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async regionMiningLoop() {
+    if (!this.regionMining || !this.bot?.entity || !this.regionPlan) return;
+    try {
+      let block = this.findRegionCandidate();
+      if (!block) {
+        const scan = this.scanRegionCursor();
+        if (scan.complete) {
+          this.regionMining = false;
+          this.regionPlan.active = false;
+          this.regionPlan.pausedReason = null;
+          this.log(`Region mining finished: ${this.regionPlan.mined} blocks mined.`);
+          this.respond(`[${this.bot.username}] Region mining finished: ${this.regionPlan.mined} blocks mined. Sealed fluids remain plugged for safety; use unseal only when ready.`);
+          return;
+        }
+        if (scan.unloaded) {
+          await this.moveToBlock({ position: scan.unloaded });
+          if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 250);
+          return;
+        }
+        block = scan.block;
+      }
+      if (!block || !this.regionMining) return;
+      await this.moveToBlock(block);
+      if (!this.regionMining) return;
+      const current = this.bot.blockAt(block.position);
+      if (this.bot.inventory.emptySlotCount() === 0) {
+        if (this.resupplyEnabled) await this.maybeResupply();
+        if (this.bot.inventory.emptySlotCount() === 0) {
+          this.regionMining = false;
+          this.regionPlan.active = false;
+          this.regionPlan.pausedReason = 'inventory is full; configure a supply point or empty the inventory';
+          this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+          return;
+        }
+      }
+      if (!this.isRegionTarget(current)) {
+        this.regionPlan.pending = null;
+        this.regionPlan.retryCount = 0;
+        this.regionTimer = setTimeout(() => this.regionMiningLoop(), 100);
+        return;
+      }
+      if (!this.bot.canDigBlock(current)) {
+        this.regionPlan.retryCount += 1;
+        if (this.regionPlan.retryCount >= 5) {
+          this.regionMining = false;
+          this.regionPlan.active = false;
+          this.regionPlan.pausedReason = `cannot reach ${current.name} at ${current.position}`;
+          this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+          return;
+        }
+        this.regionTimer = setTimeout(() => this.regionMiningLoop(), 1000);
+        return;
+      }
+      if (!(await this.sealFluidsAround(current))) {
+        this.regionMining = false;
+        this.regionPlan.active = false;
+        this.log(`Region mining paused: ${this.regionPlan.pausedReason}`, 'warn');
+        this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+        return;
+      }
+      const tool = this.bot.pathfinder.bestHarvestTool(current);
+      if (tool) await this.bot.equip(tool, 'hand');
+      this.digging = true;
+      await this.bot.lookAt(current.position.offset(0.5, 0.5, 0.5));
+      await this.bot.dig(current, true, 'raycast');
+      this.digging = false;
+      this.regionPlan.pending = null;
+      this.regionPlan.retryCount = 0;
+      this.regionPlan.mined += 1;
+      this.regionPlan.lastBlock = { name: current.name, position: { x: current.position.x, y: current.position.y, z: current.position.z } };
+      if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 180);
+    } catch (error) {
+      this.digging = false;
+      this.regionPlan.retryCount = (this.regionPlan.retryCount || 0) + 1;
+      this.regionPlan.pausedReason = error.message;
+      this.log(`Region mining cycle failed: ${error.message}`, 'warn');
+      if (this.regionPlan.retryCount >= 5) {
+        this.regionMining = false;
+        this.regionPlan.active = false;
+        this.respond(`[${this.bot.username}] Region mining paused after repeated failures: ${error.message}.`);
+        return;
+      }
+      if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 2500);
+    }
+  }
+
+  async unsealFluids() {
+    if (this.regionMining) return this.respond(`[${this.bot.username}] Stop region mining before removing fluid seals.`);
+    if (!this.regionSeals.length) return this.respond(`[${this.bot.username}] No fluid seals created by this bot.`);
+    const seals = [...this.regionSeals];
+    let removed = 0;
+    for (const seal of seals) {
+      const block = this.bot.blockAt(seal.position);
+      if (!block || cleanBlockName(block.name) !== cleanBlockName(seal.blockName)) continue;
+      try {
+        await this.moveToBlock(block);
+        await this.bot.dig(block, true, 'raycast');
+        removed += 1;
+      } catch (error) {
+        this.log(`Could not remove seal at ${seal.position}: ${error.message}`, 'warn');
+      }
+    }
+    this.regionSeals = this.regionSeals.filter((seal) => this.bot.blockAt(seal.position)?.name === seal.blockName);
+    return this.respond(`[${this.bot.username}] Removed ${removed} fluid seal(s). Water/lava may flow again.`);
+  }
+
+  lookCommand(args = []) {
+    const targetName = args[0] && this.bot.players[args[0]]?.entity ? args[0] : null;
+    if (targetName) {
+      return this.bot.lookAt(this.bot.players[targetName].entity.position.offset(0, 1, 0)).then(() => ({ ok: true, message: `Looking at ${targetName}.` }));
+    }
+    const yaw = Number(args[0]);
+    const pitch = Number(args[1]);
+    if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) return { ok: false, message: 'Usage: look <yaw degrees> <pitch degrees> or look <player>' };
+    return this.bot.look(yaw * Math.PI / 180, Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch * Math.PI / 180)), true)
+      .then(() => ({ ok: true, message: `Looking at yaw ${yaw}°, pitch ${pitch}°.` }));
+  }
+
+  setSleepMode(mode = 'on') {
+    const normalized = String(mode || 'on').toLowerCase();
+    this.sleepEnabled = !['off', 'stop', 'disable'].includes(normalized);
+    if (this.sleepEnabled) this.startMaintenanceLoop();
+    else if (!this.resupplyEnabled && this.maintenanceTimer) {
+      clearTimeout(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+    }
+    return this.respond(`[${this.bot.username}] Automatic sleep ${this.sleepEnabled ? 'enabled' : 'disabled'}.`);
+  }
+
+  persistResupplyPoints() {
+    try {
+      const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point })) } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    } catch (error) {
+      this.log(`Could not persist supply points: ${error.message}`, 'warn');
+    }
+  }
+
+  executeResupplyCommand(args = []) {
+    const action = String(args[0] || 'status').toLowerCase();
+    if (action === 'on' || action === 'enable') {
+      this.resupplyEnabled = true;
+      this.startMaintenanceLoop();
+      return this.respond(`[${this.bot.username}] Resupply enabled. Only configured supply points will be opened.`);
+    }
+    if (action === 'off' || action === 'disable') {
+      this.resupplyEnabled = false;
+      if (!this.sleepEnabled && this.maintenanceTimer) {
+        clearTimeout(this.maintenanceTimer);
+        this.maintenanceTimer = null;
+      }
+      return this.respond(`[${this.bot.username}] Resupply disabled.`);
+    }
+    const pointAction = String(args[1] || '').toLowerCase();
+    if (action === 'point' && pointAction === 'add') {
+      const values = args.slice(2, 5).map(Number);
+      if (values.length !== 3 || values.some((value) => !Number.isInteger(value))) return this.respond(`[${this.bot.username}] Usage: resupply point add <x> <y> <z>`);
+      this.resupplyPoints.push({ x: values[0], y: values[1], z: values[2] });
+      this.persistResupplyPoints();
+      return this.respond(`[${this.bot.username}] Supply point added at ${values.join(', ')}.`);
+    }
+    if (action === 'point' && pointAction === 'clear') {
+      this.resupplyPoints = [];
+      this.persistResupplyPoints();
+      return this.respond(`[${this.bot.username}] Supply points cleared.`);
+    }
+    if (action === 'status') return this.respond(`[${this.bot.username}] Resupply ${this.resupplyEnabled ? 'ON' : 'OFF'}; points: ${this.resupplyPoints.length}.`);
+    return this.respond(`[${this.bot.username}] Usage: resupply on|off|status|point add <x> <y> <z>|point clear`);
+  }
+
+  startMaintenanceLoop() {
+    if (this.maintenanceTimer || this.maintenanceBusy) return;
+    this.maintenanceLoop();
+  }
+
+  async maintenanceLoop() {
+    if (!this.bot || (!this.sleepEnabled && !this.resupplyEnabled)) return;
+    this.maintenanceBusy = true;
+    try {
+      if (this.sleepEnabled) await this.maybeSleep();
+      if (this.resupplyEnabled) await this.maybeResupply();
+    } catch (error) {
+      this.log(`Maintenance check failed: ${error.message}`, 'warn');
+    } finally {
+      this.maintenanceBusy = false;
+      if (this.bot && (this.sleepEnabled || this.resupplyEnabled)) this.maintenanceTimer = setTimeout(() => {
+        this.maintenanceTimer = null;
+        this.maintenanceLoop();
+      }, 15000);
+    }
+  }
+
+  async maybeSleep() {
+    const bot = this.bot;
+    if (!bot?.time || bot.isSleeping || !['overworld', 'minecraft:overworld'].includes(bot.game?.dimension)) return;
+    const time = Number(bot.time.timeOfDay);
+    if (!(time >= 12541 && time <= 23458)) return;
+    const bedIds = Object.entries(minecraftData(bot.version).blocksByName)
+      .filter(([name]) => name.endsWith('_bed') || name === 'bed').map(([, block]) => block.id);
+    const positions = bot.findBlocks({ matching: bedIds, maxDistance: 32, count: 1 });
+    if (!positions.length) {
+      this.log('Night detected, but no bed is available within 32 blocks.', 'warn');
+      return;
+    }
+    const bed = bot.blockAt(positions[0]);
+    if (!bed || !bot.sleep) return;
+    await this.moveToBlock(bed);
+    if (!this.sleepEnabled || bot.isSleeping) return;
+    await bot.sleep(bed);
+    this.log('Sleeping through the night.');
+  }
+
+  isToolLow(item) {
+    return Boolean(item?.name?.includes('pickaxe') && Number.isFinite(item.maxDurability) && Number.isFinite(item.durabilityUsed) && item.maxDurability - item.durabilityUsed <= 20);
+  }
+
+  isFoodItem(item) {
+    return ['bread', 'carrot', 'potato', 'beetroot', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'apple', 'melon_slice', 'baked_potato', 'cooked_'].some((part) => item.name.includes(part));
+  }
+
+  isKeepItem(item) {
+    if (item.name.includes('pickaxe') && this.isToolLow(item)) return false;
+    return this.isFoodItem(item) || ['pickaxe', 'axe', 'shovel', 'sword', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots', ...PLUG_BLOCK_NAMES].some((part) => item.name.includes(part));
+  }
+
+  async maybeResupply() {
+    const bot = this.bot;
+    if (this.resupplyBusy || !bot || !this.resupplyPoints.length) return;
+    const hasPickaxe = bot.inventory.items().some((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+    const hasFood = bot.inventory.items().some((item) => this.isFoodItem(item));
+    if (bot.inventory.emptySlotCount() > 2 && hasPickaxe && hasFood) return;
+    const point = this.resupplyPoints.map((candidate) => ({ ...candidate, distance: bot.entity.position.distanceTo(new Vec3(candidate.x, candidate.y, candidate.z)) })).sort((a, b) => a.distance - b.distance)[0];
+    const block = bot.blockAt(new Vec3(point.x, point.y, point.z));
+    if (!block || !isRegionContainerName(block.name)) {
+      this.log(`Configured supply point ${point.x},${point.y},${point.z} is not a supported container.`, 'warn');
+      return;
+    }
+    this.resupplyBusy = true;
+    let container = null;
+    try {
+      await this.moveToBlock(block);
+      container = await bot.openContainer(block);
+      for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
+        try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
+      }
+      const contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
+      const pickaxe = contents.find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+      const food = contents.find((item) => this.isFoodItem(item));
+      if (pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, Math.min(pickaxe.count, 1));
+      if (food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
+      this.log('Resupply completed from configured point.');
+    } finally {
+      if (container) {
+        try { await container.close(); } catch (_) {}
+      }
+      this.resupplyBusy = false;
     }
   }
 
@@ -490,7 +1059,7 @@ class ManagedBot extends EventEmitter {
 
   stationaryAttack() {
     const bot = this.bot;
-    if (!bot?.entity) return;
+    if (!bot?.entity || this.digging || this.resupplyBusy || bot.isSleeping) return;
     const entity = bot.nearestEntity((candidate) => this.definition.targetMobs.includes(candidate.name) && candidate.position.distanceTo(bot.entity.position) < 3.5);
     if (!entity) return;
     const sword = bot.inventory.items().find((item) => item.name.includes('sword'));
@@ -517,7 +1086,24 @@ class ManagedBot extends EventEmitter {
       killAura: this.killAuraEnabled,
       fishing: this.fishing,
       mining: this.mining,
+      regionMining: this.regionMining,
       supply: this.supply,
+      sleepEnabled: this.sleepEnabled,
+      resupplyEnabled: this.resupplyEnabled,
+      region: this.regionPlan ? {
+        bounds: this.regionPlan.bounds,
+        volume: this.regionPlan.volume,
+        mode: this.regionPlan.mode,
+        allow: this.regionPlan.allow,
+        deny: this.regionPlan.deny,
+        cursor: this.regionPlan.cursor,
+        scanned: this.regionPlan.scanned,
+        mined: this.regionPlan.mined,
+        active: this.regionPlan.active,
+        pausedReason: this.regionPlan.pausedReason,
+        lastBlock: this.regionPlan.lastBlock
+      } : null,
+      resupplyPoints: this.resupplyPoints,
       skinIdentifier: this.bot?.username || this.definition.skinUsername || this.definition.username || this.definition.id,
       inventory: inventory.slice(0, 8).map((item) => ({ name: item.name, count: item.count })),
       nearbyPlayers,
@@ -528,7 +1114,7 @@ class ManagedBot extends EventEmitter {
   }
 
   helpText() {
-    return 'fish | mine <block> [count] | supply on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
+    return 'fish | mine <block> [count] | area set <x1> <y1> <z1> <x2> <y2> <z2> | area mode blacklist|whitelist | area allow|deny <block...> | area start/stop | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
   }
 }
 

@@ -33,7 +33,8 @@ function normalizeBotDefinition(bot, defaults = {}, index = 0) {
       firstPerson: false,
       ...(bot.viewer || {})
     },
-    commandWhitelist: Array.isArray(bot.commandWhitelist) ? [...new Set(bot.commandWhitelist.map((name) => String(name).trim()).filter(Boolean))] : null
+    commandWhitelist: Array.isArray(bot.commandWhitelist) ? [...new Set(bot.commandWhitelist.map((name) => String(name).trim()).filter(Boolean))] : null,
+    resupplyPoints: Array.isArray(bot.resupplyPoints) ? bot.resupplyPoints.map((point) => ({ x: Number(point.x), y: Number(point.y), z: Number(point.z) })).filter((point) => [point.x, point.y, point.z].every(Number.isFinite)) : []
   };
 
   if (!definition.id) throw new Error(`Bot at index ${index} needs a non-empty id.`);

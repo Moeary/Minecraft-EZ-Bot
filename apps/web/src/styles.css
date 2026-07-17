@@ -166,3 +166,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 .skin-model-fallback { position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%); display: grid; justify-items: center; gap: 9px; color: rgba(255,255,255,.82); font-size: 11px; z-index: 2; }
 .skin-model-fallback .bot-face { width: 74px; height: 74px; border-radius: 18px; }
+.first-person-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; background: #f3f8f3; border: 1px solid #e1ece2; border-radius: 8px; color: #537260; font-size: 10px; }
+.first-person-controls label { display: inline-flex; align-items: center; gap: 5px; }
+.first-person-controls input[type='range'] { width: 82px; accent-color: #2e7b48; }
+.first-person-controls b { min-width: 34px; color: #2e7b48; font: 10px 'DM Mono', monospace; }
+.first-person-controls small { flex-basis: 100%; color: #8a9c90; font-size: 9px; }

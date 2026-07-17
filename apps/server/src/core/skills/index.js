@@ -7,7 +7,8 @@ const skills = [
   require('./pathfinder'),
   require('./chat-command'),
   require('./mining'),
-  require('./supply')
+  require('./supply'),
+  require('./survival')
 ];
 
 function listSkills() {

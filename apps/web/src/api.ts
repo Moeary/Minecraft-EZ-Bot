@@ -19,6 +19,7 @@ export interface BotDefinition {
   version: string;
   viewer: ViewerConfig;
   commandWhitelist?: string[] | null;
+  resupplyPoints?: Array<{ x: number; y: number; z: number }>;
 }
 
 export interface BotStatus {
@@ -40,7 +41,12 @@ export interface BotStatus {
   killAura: boolean;
   fishing: boolean;
   mining: boolean;
+  regionMining?: boolean;
   supply: boolean;
+  sleepEnabled?: boolean;
+  resupplyEnabled?: boolean;
+  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
+  resupplyPoints?: Array<{ x: number; y: number; z: number }>;
   skinIdentifier: string | null;
   inventory: Array<{ name: string; count: number }>;
   nearbyPlayers: string[];
