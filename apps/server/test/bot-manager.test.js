@@ -60,3 +60,26 @@ test('updates whitelist immediately for all managed bots', (t) => {
   assert.deepEqual(config.whitelist, ['PlayerOne', 'PlayerTwo']);
   assert.deepEqual(JSON.parse(fs.readFileSync(config.whitelistPath, 'utf8')), ['PlayerOne', 'PlayerTwo']);
 });
+
+
+test('persists Web-configured region mining filters across manager restarts', (t) => {
+  const config = createConfig();
+  t.after(() => fs.rmSync(config.rootDir, { recursive: true, force: true }));
+  const manager = new BotManager(config);
+  manager.add({ id: 'miner', host: 'localhost', username: 'Miner', auth: 'offline', viewer: { enabled: false } });
+
+  const result = manager.configureRegion('miner', {
+    x1: 10, y1: 20, z1: 30, x2: 12, y2: 21, z2: 31,
+    mode: 'blacklist', allow: [], deny: ['diamond_ore', 'ancient_debris']
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.region.volume, 12);
+  assert.deepEqual(result.region.customDeny, ['diamond_ore', 'ancient_debris']);
+  const saved = JSON.parse(fs.readFileSync(config.botsPath, 'utf8'));
+  assert.deepEqual(saved.bots[0].miningRegion.deny, ['diamond_ore', 'ancient_debris']);
+
+  const restarted = new BotManager({ ...config, bots: saved.bots });
+  assert.equal(restarted.list()[0].region.mode, 'blacklist');
+  assert.deepEqual(restarted.list()[0].region.customDeny, ['diamond_ore', 'ancient_debris']);
+});

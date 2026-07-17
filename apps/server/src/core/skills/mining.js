@@ -5,10 +5,8 @@ module.exports = {
   description: '在手动指定的长方体区域内按白名单或黑名单采集，遇到流体先封堵；容器、基岩和保护方块默认跳过。',
   commands: [
     'mine <方块> [数量]',
-    'area set <x1> <y1> <z1> <x2> <y2> <z2>',
-    'area mode blacklist|whitelist',
-    'area allow|deny <方块...>',
-    'area start|stop|status',
+    '网页：设置区域与黑/白名单',
+    'area on|off|status',
     'unseal'
   ],
   openaiTools: [{

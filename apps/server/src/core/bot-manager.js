@@ -1,5 +1,6 @@
 const EventEmitter = require('node:events');
 const { ManagedBot } = require('./managed-bot');
+const { SkinCache } = require('./skin-cache');
 const { loadConfig, normalizeBotDefinition, validateBotDefinitions } = require('../config/load-config');
 const { saveBotsConfig, saveWhitelist } = require('../config/config-store');
 
@@ -9,11 +10,12 @@ class BotManager extends EventEmitter {
     this.config = config;
     this.bots = new Map();
     this.logs = [];
+    this.skinCache = new SkinCache(config);
     for (const definition of config.bots) this.attachRuntime(definition);
   }
 
   attachRuntime(definition) {
-    const runtime = new ManagedBot(this.config, definition);
+    const runtime = new ManagedBot(this.config, definition, this.skinCache);
     runtime.on('log', (entry) => {
       this.logs.push(entry);
       if (this.logs.length > 500) this.logs.splice(0, this.logs.length - 500);
@@ -204,6 +206,38 @@ class BotManager extends EventEmitter {
     const tokens = String(line || '').trim().split(/\s+/).filter(Boolean);
     if (!tokens.length) return { ok: false, message: 'Command is empty.' };
     return this.execute(id, tokens.shift(), tokens, source);
+  }
+
+  configureRegion(id, input) {
+    const runtime = this.get(id);
+    if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
+    const result = runtime.configureRegion(input);
+    if (!result.ok) return result;
+    try {
+      const miningRegion = runtime.serializedRegionPlan();
+      const next = this.config.bots.map((bot) => bot.id === runtime.id ? { ...bot, miningRegion } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      runtime.definition = next.find((bot) => bot.id === runtime.id);
+      return { ...result, region: runtime.publicStatus().region };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  skinFile(id, kind) {
+    const runtime = this.get(id);
+    if (!runtime) return null;
+    return this.skinCache.file(runtime.id, kind);
+  }
+
+  async ensureSkin(id) {
+    const runtime = this.get(id);
+    if (!runtime) return null;
+    const cached = this.skinCache.status(runtime.id);
+    const username = runtime.bot?.username || runtime.definition.skinUsername || cached.username || (!String(runtime.definition.username || '').includes('@') ? runtime.definition.username : '');
+    if (username) await this.skinCache.ensure(runtime.id, username);
+    return this.skinCache.status(runtime.id);
   }
 
   batch(action, ids = []) {

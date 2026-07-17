@@ -40,6 +40,17 @@ function sendResult(response, result, successStatus = 200) {
   return json(response, result.ok ? successStatus : 400, result);
 }
 
+function sendPng(response, filePath) {
+  const stat = fs.statSync(filePath);
+  response.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Content-Length': stat.size,
+    'Cache-Control': 'private, max-age=300',
+    'Access-Control-Allow-Origin': '*'
+  });
+  fs.createReadStream(filePath).pipe(response);
+}
+
 function createWebServer(manager) {
   const config = manager.config;
   const staticDir = path.resolve(config.rootDir, 'apps/web/dist');
@@ -51,6 +62,14 @@ function createWebServer(manager) {
     try {
       if (pathname === '/api/health' && request.method === 'GET') {
         return json(response, 200, { ok: true, service: 'mc-bot-self', time: new Date().toISOString() });
+      }
+      const skinMatch = pathname.match(/^\/api\/skins\/([^/]+)\/(avatar|body)$/);
+      if (skinMatch && request.method === 'GET') {
+        const id = decodeURIComponent(skinMatch[1]);
+        const kind = skinMatch[2];
+        await manager.ensureSkin(id);
+        const filePath = manager.skinFile(id, kind);
+        return filePath ? sendPng(response, filePath) : json(response, 404, { ok: false, message: `No cached skin is available for ${id}. Set a Minecraft skin username or start the bot once.` });
       }
       if (pathname === '/api/bots' && request.method === 'GET') return json(response, 200, { bots: manager.list() });
       if (pathname === '/api/bots' && request.method === 'POST') {
@@ -85,7 +104,7 @@ function createWebServer(manager) {
         return json(response, 200, manager.batch(body.action, Array.isArray(body.ids) ? body.ids : []));
       }
 
-      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective))?$/);
+      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective|region))?$/);
       if (match) {
         const id = decodeURIComponent(match[1]);
         const action = match[2];
@@ -101,6 +120,9 @@ function createWebServer(manager) {
         if (request.method === 'POST' && action === 'perspective') {
           const body = await parseBody(request);
           return sendResult(response, manager.setViewerPerspective(id, body.firstPerson));
+        }
+        if (request.method === 'PUT' && action === 'region') {
+          return sendResult(response, manager.configureRegion(id, await parseBody(request)));
         }
         if (request.method === 'POST' && action === 'command') {
           const body = await parseBody(request);

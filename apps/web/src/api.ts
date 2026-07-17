@@ -20,6 +20,7 @@ export interface BotDefinition {
   viewer: ViewerConfig;
   commandWhitelist?: string[] | null;
   resupplyPoints?: Array<{ x: number; y: number; z: number }>;
+  miningRegion?: { bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }; mode: 'blacklist' | 'whitelist'; allow: string[]; deny: string[] } | null;
 }
 
 export interface BotStatus {
@@ -45,9 +46,11 @@ export interface BotStatus {
   supply: boolean;
   sleepEnabled?: boolean;
   resupplyEnabled?: boolean;
-  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
+  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; customDeny?: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
   resupplyPoints?: Array<{ x: number; y: number; z: number }>;
   skinIdentifier: string | null;
+  skin: { avatarUrl: string; bodyUrl: string; username: string | null; cached: boolean; cachedAt: string | null } | null;
+  resourceAlerts?: string[];
   inventory: Array<{ name: string; count: number }>;
   nearbyPlayers: string[];
   lastError: string | null;
@@ -141,4 +144,7 @@ export function updateBot(id: string, definition: Partial<BotDefinition>) {
 
 export function deleteBot(id: string) {
   return request<Result>(`/api/bots/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export function configureRegion(id: string, region: { x1: number; y1: number; z1: number; z2: number; x2: number; y2: number; mode: 'blacklist' | 'whitelist'; allow: string[]; deny: string[] }) {
+  return request<Result>(`/api/bots/${encodeURIComponent(id)}/region`, { method: 'PUT', body: JSON.stringify(region) });
 }

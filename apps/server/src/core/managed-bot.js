@@ -47,10 +47,11 @@ function isRegionProtectedName(name) {
 }
 
 class ManagedBot extends EventEmitter {
-  constructor(config, botConfig) {
+  constructor(config, botConfig, skinCache = null) {
     super();
     this.config = config;
     this.definition = botConfig;
+    this.skinCache = skinCache;
     this.bot = null;
     this.state = 'stopped';
     this.lastError = null;
@@ -60,6 +61,7 @@ class ManagedBot extends EventEmitter {
     this.fishingTimer = null;
     this.miningTimer = null;
     this.supplyTimer = null;
+    this.resourceTimer = null;
     this.regionTimer = null;
     this.maintenanceTimer = null;
     this.killAuraEnabled = false;
@@ -67,7 +69,7 @@ class ManagedBot extends EventEmitter {
     this.mining = false;
     this.supply = false;
     this.miningTarget = null;
-    this.regionPlan = null;
+    this.regionPlan = this.hydrateRegionPlan(botConfig.miningRegion);
     this.regionMining = false;
     this.regionSeals = [];
     this.sleepEnabled = false;
@@ -80,6 +82,8 @@ class ManagedBot extends EventEmitter {
     this.supplyRole = 'auto';
     this.chatLogEnabled = false;
     this.viewerStarted = false;
+    this.alertLastSent = new Map();
+    this.activeAlerts = new Set();
   }
 
   log(message, level = 'info') {
@@ -132,6 +136,7 @@ class ManagedBot extends EventEmitter {
     delete options.skinUsername;
     delete options.commandWhitelist;
     delete options.resupplyPoints;
+    delete options.miningRegion;
     if (options.auth === 'microsoft') {
       options.onMsaCode = (data) => {
         const verification = data.verification_uri || data.verificationUri || 'https://www.microsoft.com/link';
@@ -156,6 +161,11 @@ class ManagedBot extends EventEmitter {
 
     bot.on('login', () => {
       this.log(`${bot.username || this.displayName} logged in.`);
+      if (this.skinCache && bot.username) {
+        this.skinCache.ensure(this.id, bot.username, true).then((status) => {
+          if (status.cached) this.log(`Player skin cached for ${status.username}.`);
+        }).catch((error) => this.log(`Player skin cache failed: ${error.message}`, 'warn'));
+      }
     });
 
     bot.on('spawn', () => {
@@ -169,11 +179,13 @@ class ManagedBot extends EventEmitter {
       this.setState('online');
       this.startViewer();
       this.startAttackLoop();
+      this.startResourceMonitor();
       if (this.sleepEnabled || this.resupplyEnabled) this.startMaintenanceLoop();
       this.log('Ready for commands.');
     });
 
     bot.on('chat', (username, message) => this.handleChat(username, message));
+    bot.on('health', () => this.checkResourceAlerts());
 
     bot.on('end', (reason) => {
       if (this.bot !== bot) return;
@@ -247,6 +259,8 @@ class ManagedBot extends EventEmitter {
       try { this.bot.viewer.close(); } catch (_) {}
     }
     this.viewerStarted = false;
+    this.alertLastSent = new Map();
+    this.activeAlerts = new Set();
   }
 
   startAttackLoop() {
@@ -265,6 +279,8 @@ class ManagedBot extends EventEmitter {
     this.miningTimer = null;
     if (this.supplyTimer) clearTimeout(this.supplyTimer);
     this.supplyTimer = null;
+    if (this.resourceTimer) clearTimeout(this.resourceTimer);
+    this.resourceTimer = null;
     if (this.regionTimer) clearTimeout(this.regionTimer);
     this.regionTimer = null;
     if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
@@ -483,8 +499,11 @@ class ManagedBot extends EventEmitter {
       await this.moveToBlock(block);
       const current = bot.blockAt(block.position);
       if (!current || !bot.canDigBlock(current)) throw new Error('Target block is not diggable from the current position.');
-      const tool = bot.pathfinder.bestHarvestTool(current);
-      if (tool) await bot.equip(tool, 'hand');
+      const toolReady = await this.prepareHarvestTool(current, 'Targeted mining');
+      if (!toolReady) {
+        this.mining = false;
+        return;
+      }
       this.digging = true;
       await bot.lookAt(current.position.offset(0.5, 0.5, 0.5));
       await bot.dig(current, true, 'raycast');
@@ -514,6 +533,87 @@ class ManagedBot extends EventEmitter {
     return [...new Set(names)];
   }
 
+  defaultRegionDeny() {
+    return [...new Set([...REGION_PROTECTED_NAMES, ...REGION_FLUIDS, ...REGION_CONTAINER_NAMES, 'shulker_box'])];
+  }
+
+  hydrateRegionPlan(input) {
+    if (!input?.bounds) return null;
+    const bounds = input.bounds;
+    const values = [bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ].map(Number);
+    if (values.some((value) => !Number.isInteger(value))) return null;
+    const [minX, minY, minZ, maxX, maxY, maxZ] = values;
+    const normalizedBounds = {
+      minX: Math.min(minX, maxX), maxX: Math.max(minX, maxX),
+      minY: Math.min(minY, maxY), maxY: Math.max(minY, maxY),
+      minZ: Math.min(minZ, maxZ), maxZ: Math.max(minZ, maxZ)
+    };
+    const volume = (normalizedBounds.maxX - normalizedBounds.minX + 1) * (normalizedBounds.maxY - normalizedBounds.minY + 1) * (normalizedBounds.maxZ - normalizedBounds.minZ + 1);
+    if (volume > MAX_REGION_VOLUME) return null;
+    const mode = input.mode === 'whitelist' ? 'whitelist' : 'blacklist';
+    const allow = Array.isArray(input.allow) ? [...new Set(input.allow.map(cleanBlockName).filter(Boolean))] : [];
+    const customDeny = Array.isArray(input.deny) ? input.deny.map(cleanBlockName).filter(Boolean) : [];
+    return {
+      bounds: normalizedBounds,
+      volume,
+      mode,
+      allow,
+      customDeny: [...new Set(customDeny)],
+      deny: [...new Set([...this.defaultRegionDeny(), ...customDeny])],
+      cursor: 0,
+      scanned: 0,
+      mined: 0,
+      active: false,
+      pausedReason: null,
+      lastBlock: null,
+      pending: null,
+      retryCount: 0
+    };
+  }
+
+  serializedRegionPlan() {
+    if (!this.regionPlan) return null;
+    return {
+      bounds: { ...this.regionPlan.bounds },
+      mode: this.regionPlan.mode,
+      allow: [...this.regionPlan.allow],
+      deny: [...(this.regionPlan.customDeny || [])]
+    };
+  }
+
+  configureRegion(input = {}) {
+    if (this.regionMining) return { ok: false, message: 'Stop region mining before changing its configuration.' };
+    const bounds = input.bounds || {};
+    const parsed = this.regionBoundsFromArgs([
+      bounds.minX ?? input.x1, bounds.minY ?? input.y1, bounds.minZ ?? input.z1,
+      bounds.maxX ?? input.x2, bounds.maxY ?? input.y2, bounds.maxZ ?? input.z2
+    ]);
+    if (!parsed || parsed.error) return { ok: false, message: parsed?.error || 'Six integer coordinates are required.' };
+    const mode = String(input.mode || 'blacklist').toLowerCase();
+    if (!['blacklist', 'whitelist'].includes(mode)) return { ok: false, message: 'Mode must be blacklist or whitelist.' };
+    const allow = Array.isArray(input.allow) ? [...new Set(input.allow.map(cleanBlockName).filter(Boolean))] : [];
+    const deny = Array.isArray(input.deny) ? [...new Set(input.deny.map(cleanBlockName).filter(Boolean))] : [];
+    if (mode === 'whitelist' && !allow.length) return { ok: false, message: 'Whitelist mode needs at least one allowed block.' };
+    this.regionPlan = {
+      bounds: parsed.bounds,
+      volume: parsed.volume,
+      mode,
+      allow,
+      customDeny: deny,
+      deny: [...new Set([...this.defaultRegionDeny(), ...deny])],
+      cursor: 0,
+      scanned: 0,
+      mined: 0,
+      active: false,
+      pausedReason: null,
+      lastBlock: null,
+      pending: null,
+      retryCount: 0
+    };
+    this.log(`Region mining configuration saved (${mode}, ${parsed.volume} blocks).`);
+    return { ok: true, message: `Mining region saved: ${parsed.volume} blocks in ${mode} mode.` };
+  }
+
   regionBoundsFromArgs(args) {
     const numbers = args.slice(0, 6).map((value) => Number(value));
     if (numbers.length !== 6 || numbers.some((value) => !Number.isInteger(value))) return null;
@@ -538,7 +638,8 @@ class ManagedBot extends EventEmitter {
         volume: parsed.volume,
         mode: this.regionPlan?.mode || 'blacklist',
         allow: this.regionPlan?.allow || [],
-        deny: this.regionPlan?.deny || [...REGION_PROTECTED_NAMES, ...REGION_FLUIDS, ...REGION_CONTAINER_NAMES, 'shulker_box'],
+        customDeny: this.regionPlan?.customDeny || [],
+        deny: this.regionPlan?.deny || this.defaultRegionDeny(),
         cursor: 0,
         scanned: 0,
         mined: 0,
@@ -566,13 +667,15 @@ class ManagedBot extends EventEmitter {
     if (action === 'deny' || action === 'blacklist') {
       const names = this.expandRegionBlockNames(args.slice(1));
       if (!names.length) return this.respond(`[${this.bot.username}] Usage: area deny <block...>`);
-      this.regionPlan.deny = [...new Set([...this.regionPlan.deny, ...names])];
-      return this.respond(`[${this.bot.username}] Region deny list updated: ${this.regionPlan.deny.join(', ')}.`);
+      this.regionPlan.customDeny = [...new Set([...(this.regionPlan.customDeny || []), ...names])];
+      this.regionPlan.deny = [...new Set([...this.defaultRegionDeny(), ...this.regionPlan.customDeny])];
+      return this.respond(`[${this.bot.username}] Region deny list updated: ${this.regionPlan.customDeny.join(', ')}.`);
     }
     if (action === 'reset') {
       this.regionPlan.mode = 'blacklist';
       this.regionPlan.allow = [];
-      this.regionPlan.deny = [...REGION_PROTECTED_NAMES, ...REGION_FLUIDS, ...REGION_CONTAINER_NAMES, 'shulker_box'];
+      this.regionPlan.customDeny = [];
+      this.regionPlan.deny = this.defaultRegionDeny();
       return this.respond(`[${this.bot.username}] Region filters reset to the safe blacklist.`);
     }
     if (action === 'start' || action === 'on') return this.startRegionMining();
@@ -798,8 +901,13 @@ class ManagedBot extends EventEmitter {
         this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
         return;
       }
-      const tool = this.bot.pathfinder.bestHarvestTool(current);
-      if (tool) await this.bot.equip(tool, 'hand');
+      const toolReady = await this.prepareHarvestTool(current, 'Region mining');
+      if (!toolReady) {
+        this.regionMining = false;
+        this.regionPlan.active = false;
+        this.regionPlan.pausedReason = 'no usable tool was found';
+        return;
+      }
       this.digging = true;
       await this.bot.lookAt(current.position.offset(0.5, 0.5, 0.5));
       await this.bot.dig(current, true, 'raycast');
@@ -953,11 +1061,44 @@ class ManagedBot extends EventEmitter {
   }
 
   isToolLow(item) {
-    return Boolean(item?.name?.includes('pickaxe') && Number.isFinite(item.maxDurability) && Number.isFinite(item.durabilityUsed) && item.maxDurability - item.durabilityUsed <= 20);
+    const isTool = ['pickaxe', 'axe', 'shovel', 'sword', 'hoe'].some((name) => item?.name?.includes(name));
+    return Boolean(isTool && Number.isFinite(item.maxDurability) && Number.isFinite(item.durabilityUsed) && item.maxDurability - item.durabilityUsed <= 20);
   }
 
   isFoodItem(item) {
-    return ['bread', 'carrot', 'potato', 'beetroot', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'apple', 'melon_slice', 'baked_potato', 'cooked_'].some((part) => item.name.includes(part));
+    return ['bread', 'carrot', 'potato', 'beetroot', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'apple', 'melon_slice', 'baked_potato', 'cooked_'].some((part) => item?.name?.includes(part));
+  }
+
+  hasUsablePickaxe() {
+    return Boolean(this.bot?.inventory?.items().some((item) => item.name.includes('pickaxe') && !this.isToolLow(item)));
+  }
+
+  blockNeedsTool(block) {
+    return Boolean(block?.harvestTools && Object.keys(block.harvestTools).length);
+  }
+
+  usableHarvestTool(block) {
+    if (!this.bot || !block) return null;
+    const preferred = this.bot.pathfinder.bestHarvestTool(block);
+    if (preferred && !this.isToolLow(preferred)) return preferred;
+    if (!block.harvestTools) return null;
+    return this.bot.inventory.items().find((item) => block.harvestTools[item.type] && !this.isToolLow(item)) || null;
+  }
+
+  async prepareHarvestTool(block, taskName) {
+    let tool = this.usableHarvestTool(block);
+    if (!tool && this.blockNeedsTool(block) && this.resupplyEnabled) {
+      await this.maybeResupply({ requirePickaxe: true, requireFood: false });
+      tool = this.usableHarvestTool(block);
+    }
+    if (!tool && this.blockNeedsTool(block)) {
+      const message = `${taskName} 已暂停：${block.name} 需要可用工具，但背包和已配置补给点中都没有找到。`;
+      this.resourceAlert('missing-required-tool', true, message, 30000);
+      return null;
+    }
+    this.resourceAlert('missing-required-tool', false, '');
+    if (tool) await this.bot.equip(tool, 'hand');
+    return tool || true;
   }
 
   isKeepItem(item) {
@@ -965,17 +1106,79 @@ class ManagedBot extends EventEmitter {
     return this.isFoodItem(item) || ['pickaxe', 'axe', 'shovel', 'sword', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots', ...PLUG_BLOCK_NAMES].some((part) => item.name.includes(part));
   }
 
-  async maybeResupply() {
+  clearResourceAlertPrefix(prefix) {
+    for (const key of this.activeAlerts) {
+      if (key.startsWith(prefix)) this.activeAlerts.delete(key);
+    }
+  }
+
+  resourceAlert(key, active, message, cooldownMs = 120000) {
+    if (!active) {
+      this.activeAlerts.delete(key);
+      return false;
+    }
+    const now = Date.now();
+    const last = this.alertLastSent.get(key) || 0;
+    const first = !this.activeAlerts.has(key);
+    this.activeAlerts.add(key);
+    if (!first && now - last < cooldownMs) return false;
+    this.alertLastSent.set(key, now);
+    this.log(message, 'warn');
+    if (this.bot?.chat) this.bot.chat(`[${this.bot.username}] 警告：${message}`);
+    return true;
+  }
+
+  startResourceMonitor() {
+    if (this.resourceTimer) return;
+    const tick = async () => {
+      this.resourceTimer = null;
+      if (!this.bot) return;
+      try { await this.checkResourceAlerts(); } catch (error) { this.log(`Resource monitor failed: ${error.message}`, 'warn'); }
+      if (this.bot) this.resourceTimer = setTimeout(tick, 10000);
+    };
+    tick();
+  }
+
+  async checkResourceAlerts() {
     const bot = this.bot;
-    if (this.resupplyBusy || !bot || !this.resupplyPoints.length) return;
-    const hasPickaxe = bot.inventory.items().some((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+    if (!bot?.inventory) return;
+    const items = bot.inventory.items();
+    const hasFood = items.some((item) => this.isFoodItem(item));
+    const lowHealth = typeof bot.health === 'number' && bot.health <= 8;
+    const hungryWithoutFood = typeof bot.food === 'number' && bot.food <= 14 && !hasFood;
+    const miningNeedsPickaxe = (this.mining || this.regionMining) && !this.hasUsablePickaxe();
+    this.resourceAlert('low-health', lowHealth, `生命值过低（${Math.round(bot.health)}/20），已关闭战斗，需要食物或治疗。`);
+    if (lowHealth && this.killAuraEnabled) {
+      this.killAuraEnabled = false;
+      bot.pvp?.stop();
+    }
+    this.resourceAlert('no-food', hungryWithoutFood, `饱食度较低（${Math.round(bot.food)}/20），背包里没有找到可食用物品。`);
+    this.resourceAlert('no-pickaxe', miningNeedsPickaxe, '挖矿需要可用镐，但背包里没有找到。');
+    if (!hungryWithoutFood && !miningNeedsPickaxe) this.clearResourceAlertPrefix('resupply-');
+    if ((hungryWithoutFood || miningNeedsPickaxe) && this.resupplyEnabled && !this.resupplyBusy) {
+      const result = await this.maybeResupply({ requireFood: hungryWithoutFood, requirePickaxe: miningNeedsPickaxe });
+      if (!result.ok) this.resourceAlert(`resupply-${result.reason}`, true, `自动补给失败：${result.message}`);
+      else this.clearResourceAlertPrefix('resupply-');
+    }
+  }
+
+  async maybeResupply(requirements = {}) {
+    const bot = this.bot;
+    if (this.resupplyBusy) return { ok: false, reason: 'busy', message: 'another resupply operation is already running' };
+    if (!bot?.entity) return { ok: false, reason: 'offline', message: 'bot world data is unavailable' };
+    const hasPickaxe = this.hasUsablePickaxe();
     const hasFood = bot.inventory.items().some((item) => this.isFoodItem(item));
-    if (bot.inventory.emptySlotCount() > 2 && hasPickaxe && hasFood) return;
+    const needPickaxe = requirements.requirePickaxe ?? !hasPickaxe;
+    const needFood = requirements.requireFood ?? !hasFood;
+    const inventoryFull = bot.inventory.emptySlotCount() <= 2;
+    if (!inventoryFull && (!needPickaxe || hasPickaxe) && (!needFood || hasFood)) return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
+    if (!this.resupplyPoints.length) return { ok: false, reason: 'no-point', message: 'no supply point is configured' };
     const point = this.resupplyPoints.map((candidate) => ({ ...candidate, distance: bot.entity.position.distanceTo(new Vec3(candidate.x, candidate.y, candidate.z)) })).sort((a, b) => a.distance - b.distance)[0];
     const block = bot.blockAt(new Vec3(point.x, point.y, point.z));
     if (!block || !isRegionContainerName(block.name)) {
-      this.log(`Configured supply point ${point.x},${point.y},${point.z} is not a supported container.`, 'warn');
-      return;
+      const message = `configured supply point ${point.x},${point.y},${point.z} is not a supported container`;
+      this.log(message, 'warn');
+      return { ok: false, reason: 'invalid-point', message };
     }
     this.resupplyBusy = true;
     let container = null;
@@ -988,9 +1191,17 @@ class ManagedBot extends EventEmitter {
       const contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
       const pickaxe = contents.find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
       const food = contents.find((item) => this.isFoodItem(item));
-      if (pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, Math.min(pickaxe.count, 1));
-      if (food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
+      if (needPickaxe && !this.hasUsablePickaxe() && pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
+      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item)) && food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
+      const missing = [];
+      if (needPickaxe && !this.hasUsablePickaxe()) missing.push('usable pickaxe');
+      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item))) missing.push('food');
+      if (missing.length) return { ok: false, reason: 'stock-empty', message: `nearest supply container has no ${missing.join(' or ')}` };
       this.log('Resupply completed from configured point.');
+      return { ok: true, reason: 'completed', message: 'resupply completed' };
+    } catch (error) {
+      this.log(`Resupply failed: ${error.message}`, 'warn');
+      return { ok: false, reason: 'operation-failed', message: error.message };
     } finally {
       if (container) {
         try { await container.close(); } catch (_) {}
@@ -1049,6 +1260,7 @@ class ManagedBot extends EventEmitter {
     try {
       const bot = this.bot;
       if (bot.autoEat?.eat && typeof bot.food === 'number' && bot.food <= 14 && !bot.autoEat.isEating) await bot.autoEat.eat();
+      await this.checkResourceAlerts();
       this.equipRole(this.supplyRole === 'auto' ? 'auto' : this.supplyRole, false);
     } catch (error) {
       this.log(`Supply check failed: ${error.message}`, 'warn');
@@ -1096,6 +1308,7 @@ class ManagedBot extends EventEmitter {
         mode: this.regionPlan.mode,
         allow: this.regionPlan.allow,
         deny: this.regionPlan.deny,
+        customDeny: this.regionPlan.customDeny || [],
         cursor: this.regionPlan.cursor,
         scanned: this.regionPlan.scanned,
         mined: this.regionPlan.mined,
@@ -1104,7 +1317,13 @@ class ManagedBot extends EventEmitter {
         lastBlock: this.regionPlan.lastBlock
       } : null,
       resupplyPoints: this.resupplyPoints,
-      skinIdentifier: this.bot?.username || this.definition.skinUsername || this.definition.username || this.definition.id,
+      skinIdentifier: this.bot?.username || this.definition.skinUsername || this.skinCache?.status(this.id).username || (!String(this.definition.username || '').includes('@') ? this.definition.username : this.definition.id),
+      skin: this.skinCache ? {
+        avatarUrl: `/api/skins/${encodeURIComponent(this.id)}/avatar`,
+        bodyUrl: `/api/skins/${encodeURIComponent(this.id)}/body`,
+        ...this.skinCache.status(this.id)
+      } : null,
+      resourceAlerts: [...this.activeAlerts],
       inventory: inventory.slice(0, 8).map((item) => ({ name: item.name, count: item.count })),
       nearbyPlayers,
       lastError: this.lastError,
@@ -1114,7 +1333,7 @@ class ManagedBot extends EventEmitter {
   }
 
   helpText() {
-    return 'fish | mine <block> [count] | area set <x1> <y1> <z1> <x2> <y2> <z2> | area mode blacklist|whitelist | area allow|deny <block...> | area start/stop | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
+    return 'fish | mine <block> [count] | 网页配置区域和黑/白名单后使用 area on/off/status | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
   }
 }
 

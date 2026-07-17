@@ -16,6 +16,7 @@ config/*.local.*
 # Runtime state, auth cache, logs, and temporary files
 data/auth/
 data/runtime/
+data/skins/
 logs/
 *.log
 *.tmp
