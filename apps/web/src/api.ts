@@ -5,15 +5,20 @@ export type SkillSettings = Record<SkillKey, { enabled: boolean; priority: numbe
 
 export interface SupplyCoordinate { x: number; y: number; z: number }
 export interface SupplyContainer extends SupplyCoordinate { role: 'storage' | 'pickup' | 'mixed' }
+export type SupplyRole = 'food' | 'pickaxe' | 'sleep' | 'storage';
 export interface SupplyPoint {
   id: string;
   name: string;
+  home: string | null;
+  roles: SupplyRole[];
   dimension: string | null;
-  x: number;
-  y: number;
-  z: number;
+  x: number | null;
+  y: number | null;
+  z: number | null;
   bed: SupplyCoordinate | null;
   containers: SupplyContainer[];
+  scanRadius: number;
+  autoDiscover: boolean;
   enabled: boolean;
   priority: number;
 }

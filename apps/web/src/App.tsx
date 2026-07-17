@@ -22,6 +22,7 @@ import {
   type SkillKey,
   type SkillSettings,
   type SupplyPoint,
+  type SupplyRole,
   type LogEntry,
   type WebConfig
 } from './api';
@@ -55,15 +56,41 @@ const quickCommands = [
 ];
 
 const skills = [
-  { icon: '⚔', name: '基础战斗', key: 'combat', description: '自动装备武器、锁定附近敌对生物并进行定点攻击。', commands: ['kill on', 'kill off', 'stop'], status: '已启用' },
-  { icon: '⌁', name: '自动钓鱼', key: 'fishing', description: '寻找鱼竿并进入持续钓鱼循环，适合挂机收集食物与经验。', commands: ['fish', 'stop'], status: '已启用' },
-  { icon: '◎', name: '跟随与导航', key: 'pathfinder', description: '跟随指定玩家、前往家的坐标，并避开不可行走区域。', commands: ['follow <玩家>', 'come <玩家>', 'home <名称>'], status: '已启用' },
-  { icon: '▣', name: '聊天指令', key: 'chat-command', description: '按机器人独立白名单接收游戏内指令，默认拒绝陌生玩家。', commands: ['status', 'info on/off'], status: '安全策略' },
-  { icon: '⛏', name: '自动挖矿与资源采集', key: 'mining', description: '在指定长方体区域内按白名单或黑名单采集，容器与流体默认保护并在必要时安全封堵。', commands: ['网页设置区域', '网页选择黑/白名单', 'area on', 'area off', 'unseal'], status: '已启用' },
-  { icon: '◈', name: '自动补给与装备管理', key: 'supply', description: '使用现有物品自动进食、换装，并仅从配置的补给点存取物资。', commands: ['supply on', 'resupply on', 'point add', 'equip auto'], status: '已启用' },
-  { icon: '◒', name: '夜间生存与续航', key: 'survival', description: '夜间自动找床睡觉，并按配置的补给点存放物品、领取稿子和食物。', commands: ['sleep on/off', 'resupply on/off', 'point add'], status: '已启用' },
-  { icon: '✦', name: 'OpenAI 工具链（预留）', key: 'openai-tools', description: '为未来的自然语言对话准备工具声明与执行边界，当前不会调用模型。', commands: ['tool schema', 'approval gate'], status: '规划中' }
+  { icon: '⚔', name: '基础战斗', key: 'combat', description: '自动装备武器、锁定附近敌对生物并进行定点攻击。', capabilities: ['敌对生物筛选', '低血自动停战', '与补给并行'], commands: ['kill on', 'kill off', 'stop'], status: '已启用' },
+  { icon: '⌁', name: '自动钓鱼', key: 'fishing', description: '寻找鱼竿并进入持续钓鱼循环，适合挂机收集食物与经验。', capabilities: ['自动抛竿', '自动收杆', '任务锁协调'], commands: ['fish', 'stop'], status: '已启用' },
+  { icon: '◎', name: '跟随与导航', key: 'pathfinder', description: '跟随指定玩家、使用服务器 Home，并避开不可行走区域。', capabilities: ['玩家跟随', 'Home 传送', '安全寻路'], commands: ['follow <玩家>', 'come <玩家>', 'home <名称>'], status: '已启用' },
+  { icon: '▣', name: '聊天指令', key: 'chat-command', description: '按机器人独立白名单接收游戏内指令，默认拒绝陌生玩家。', capabilities: ['独立白名单', '目标机器人解析', '指令审计'], commands: ['status', 'info on/off'], status: '安全策略' },
+  { icon: '⛏', name: '区域清空与资源采集', key: 'mining', description: '清空指定长方体区域，使用可视化黑白名单控制方块，并保护容器、流体与关键设施。', capabilities: ['区域断点扫描', '流体安全封堵', '临时 Home 检查点', '工具缺失暂停'], commands: ['网页设置区域', 'area on', 'area off', 'unseal'], status: '已启用' },
+  { icon: '◈', name: 'Home 补给与仓储', key: 'supply', description: '按食物、镐子和矿物存储角色访问指定 Home，并扫描附近多个安全容器。', capabilities: ['食物补给', '镐子补给', '多容器卸货', '自动换装'], commands: ['网页配置 Home', 'resupply on', 'equip auto'], status: '已启用' },
+  { icon: '◒', name: '夜间生存与续航', key: 'survival', description: '夜间前往睡眠 Home，维护结束后通过临时检查点返回矿区继续工作。', capabilities: ['夜间睡觉', '低血/缺粮告警', '检查点回程', '失败游戏内提醒'], commands: ['sleep on/off', 'resupply on/off'], status: '已启用' },
+  { icon: '✦', name: 'OpenAI 工具链（预留）', key: 'openai-tools', description: '为未来的自然语言对话准备工具声明与执行边界，当前不会调用模型。', capabilities: ['工具 Schema', '审批边界', '暂不调用模型'], commands: ['tool schema', 'approval gate'], status: '规划中' }
 ];
+
+type MiningBlock = { id: string; name: string; category: '矿石' | '地形' | '自然' | '建筑' | '永久保护'; tone: string; protected?: boolean };
+
+const miningBlocks: MiningBlock[] = [
+  { id: 'coal_ore', name: '煤矿石', category: '矿石', tone: '#4b4b46' }, { id: 'deepslate_coal_ore', name: '深层煤矿石', category: '矿石', tone: '#353a3b' },
+  { id: 'iron_ore', name: '铁矿石', category: '矿石', tone: '#c7a58b' }, { id: 'deepslate_iron_ore', name: '深层铁矿石', category: '矿石', tone: '#8f7568' },
+  { id: 'copper_ore', name: '铜矿石', category: '矿石', tone: '#b96f52' }, { id: 'deepslate_copper_ore', name: '深层铜矿石', category: '矿石', tone: '#7c594f' },
+  { id: 'gold_ore', name: '金矿石', category: '矿石', tone: '#e5c84b' }, { id: 'deepslate_gold_ore', name: '深层金矿石', category: '矿石', tone: '#9b8848' },
+  { id: 'redstone_ore', name: '红石矿石', category: '矿石', tone: '#c43d37' }, { id: 'deepslate_redstone_ore', name: '深层红石矿石', category: '矿石', tone: '#7f3334' },
+  { id: 'lapis_ore', name: '青金石矿石', category: '矿石', tone: '#386ac7' }, { id: 'deepslate_lapis_ore', name: '深层青金石矿石', category: '矿石', tone: '#344d83' },
+  { id: 'diamond_ore', name: '钻石矿石', category: '矿石', tone: '#52cbd0' }, { id: 'deepslate_diamond_ore', name: '深层钻石矿石', category: '矿石', tone: '#397d81' },
+  { id: 'emerald_ore', name: '绿宝石矿石', category: '矿石', tone: '#43b864' }, { id: 'deepslate_emerald_ore', name: '深层绿宝石矿石', category: '矿石', tone: '#39744c' },
+  { id: 'nether_gold_ore', name: '下界金矿石', category: '矿石', tone: '#b75f42' }, { id: 'nether_quartz_ore', name: '下界石英矿石', category: '矿石', tone: '#eadbd0' }, { id: 'ancient_debris', name: '远古残骸', category: '矿石', tone: '#65433d' },
+  { id: 'stone', name: '石头', category: '地形', tone: '#888b88' }, { id: 'deepslate', name: '深板岩', category: '地形', tone: '#4e5353' }, { id: 'tuff', name: '凝灰岩', category: '地形', tone: '#6f766f' },
+  { id: 'granite', name: '花岗岩', category: '地形', tone: '#a56d5a' }, { id: 'diorite', name: '闪长岩', category: '地形', tone: '#c8c8c3' }, { id: 'andesite', name: '安山岩', category: '地形', tone: '#8b8d8c' },
+  { id: 'dirt', name: '泥土', category: '地形', tone: '#79543a' }, { id: 'grass_block', name: '草方块', category: '地形', tone: '#63a348' }, { id: 'gravel', name: '沙砾', category: '地形', tone: '#7d7875' },
+  { id: 'sand', name: '沙子', category: '地形', tone: '#d8c886' }, { id: 'sandstone', name: '砂岩', category: '地形', tone: '#d4c27e' }, { id: 'netherrack', name: '下界岩', category: '地形', tone: '#7d3838' }, { id: 'end_stone', name: '末地石', category: '地形', tone: '#d8d79b' },
+  { id: 'oak_log', name: '橡木原木', category: '自然', tone: '#8a693f' }, { id: 'spruce_log', name: '云杉原木', category: '自然', tone: '#5f432b' }, { id: 'clay', name: '黏土块', category: '自然', tone: '#a3a9b3' }, { id: 'mud', name: '泥巴', category: '自然', tone: '#4d4a47' },
+  { id: 'cobblestone', name: '圆石', category: '建筑', tone: '#707370' }, { id: 'stone_bricks', name: '石砖', category: '建筑', tone: '#777b77' }, { id: 'oak_planks', name: '橡木木板', category: '建筑', tone: '#b58a51' },
+  { id: 'chest', name: '箱子', category: '永久保护', tone: '#b27a32', protected: true }, { id: 'barrel', name: '木桶', category: '永久保护', tone: '#8d6035', protected: true },
+  { id: 'shulker_box', name: '潜影盒', category: '永久保护', tone: '#956f9d', protected: true }, { id: 'bedrock', name: '基岩', category: '永久保护', tone: '#303331', protected: true },
+  { id: 'water', name: '水', category: '永久保护', tone: '#3b75d6', protected: true }, { id: 'lava', name: '岩浆', category: '永久保护', tone: '#e66b22', protected: true },
+  { id: 'spawner', name: '刷怪笼', category: '永久保护', tone: '#27312c', protected: true }, { id: 'end_portal_frame', name: '末地传送门框架', category: '永久保护', tone: '#536d54', protected: true }
+];
+
+const supplyRoleLabels: Record<SupplyRole, string> = { food: '食物补给', pickaxe: '镐子补给', sleep: '夜间睡觉', storage: '矿物存储' };
 
 const emptyForm: BotForm = {
   id: '', displayName: '', skinUsername: '', enabled: true, host: '', port: '25565', username: '', auth: 'microsoft', version: '',
@@ -323,14 +350,14 @@ const skillGuides: Record<string, { examples: string[]; notes: string[]; next: s
   fishing: { examples: ['Shinano fish', 'fish Shinano', 'Shinano stop'], notes: ['先确认机器人背包里有鱼竿。', '停止钓鱼可以使用 stop，不会影响连接。'], next: ['自动收杆与补充鱼竿', '定点农场巡逻'] },
   pathfinder: { examples: ['follow Shinano', 'come Shinano', 'home base Shinano'], notes: ['follow 和 come 后面填写在线玩家名。', 'home 后面填写已配置的家名称。'], next: ['资源采集路线', '多机器人分工导航'] },
   'chat-command': { examples: ['status Shinano', '!info on Shinano', 'info off Shinano'], notes: ['聊天指令会经过每个 bot 的白名单校验。', '建议使用“机器人名 + 指令”格式，辨识度最高。'], next: ['白名单分组与权限级别', '指令冷却与审计'] },
-  mining: { examples: ['网页保存 Shinano 的区域配置', 'Shinano area on', 'Shinano area status', 'Shinano area off', 'Shinano unseal'], notes: ['默认黑名单会保护箱子、容器、床、基岩、传送门和水/岩浆；白名单模式必须明确允许方块。', '遇到水或岩浆时会先用背包中的圆石等方块封堵；本轮结束后封堵物仍保留，确认安全后再执行 unseal。', '区域体积有上限，路径、未加载区块、缺少工具或缺少封堵方块时会暂停而不是冒险继续。'], next: ['矿区分层路线规划', '耐久度与经验阈值'] },
-  supply: { examples: ['Shinano supply on', 'Shinano resupply point add 10 64 -5', 'Shinano resupply on', 'Shinano equip pickaxe'], notes: ['只使用机器人当前背包已有的食物和工具，不会生成或购买物品。', '补给只会访问手动配置的容器坐标，避免误开玩家箱子；请先确认容器区安全。', '补给点需要准备稿子、食物和存放空间；自动进食可与区域挖矿、战斗同时运行。'], next: ['耐久度预警与自动换装', '多补给点库存策略'] },
-  survival: { examples: ['Shinano sleep on', 'Shinano resupply on', 'Shinano resupply status'], notes: ['睡觉只在主世界夜间执行，并且只寻找附近床铺；找不到床会记录日志。', 'sleep、resupply、mine、kill 可以并行开启，但路径移动可能互相竞争，建议补给点靠近矿区。', '补给点坐标和内容需要先人工确认，机器人不会自动破坏或寻找未知箱子。'], next: ['自动返回安全屋', '工具耐久和食物阈值策略'] },
+  mining: { examples: ['网页选择方块并保存区域', 'Shinano area on', 'Shinano area status', 'Shinano area off', 'Shinano unseal'], notes: ['网页会把中文方块名映射为真实 Minecraft ID；容器、床、基岩、传送门和流体始终保护。', '离开矿区补给前会创建临时 Home 检查点，维护完成后返回并删除检查点。', '缺少工具、食物、封堵方块或路径不可达时会暂停并在游戏内报告，不会强行继续。'], next: ['矿区分层路线规划', '区块加载器与跨区队列'] },
+  supply: { examples: ['网页初始化 /home 补给', '网页初始化 /home 存储', 'Shinano resupply on', 'Shinano equip pickaxe'], notes: ['食物、镐子和睡觉可以映射到同一个 Home，矿物存储可以映射到另一个 Home。', '机器人只会在已配置 Home 的锚点附近扫描箱子、木桶和潜影盒，并会依次尝试多个仍有空间的容器。', 'Home 传送失败、没有食物或没有可用镐子时会在游戏聊天与日志中明确报告。'], next: ['容器库存索引', '补给策略统计'] },
+  survival: { examples: ['Shinano sleep on', 'Shinano resupply on', 'Shinano resupply status'], notes: ['夜间会前往带“睡觉”角色的 Home，并只在该 Home 的安全扫描范围内找床。', 'sleep、resupply、mine、kill 可以同时开启；调度器会让补给和生存任务优先占用移动锁。', '挖矿期间离开现场会自动 sethome 临时检查点，结束后 home 返回并 delhome 清理。'], next: ['图腾与药水管理', '危险环境撤离策略'] },
   'openai-tools': { examples: ['暂未启用游戏内喊话'], notes: ['当前只展示工具声明和审批边界，不会调用模型。', '后续启用前会增加逐次确认和可撤销操作。'], next: ['自然语言任务规划', '工具调用审批中心'] }
 };
 
 function SkillsPage({ bots, selected, skillOverview, onOpenSkill, run }: { bots: BotStatus[]; selected?: BotStatus; skillOverview: SkillOverview | null; onOpenSkill: (key: string) => void; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
-  return <><div className="page-heading compact"><div><span className="eyebrow">AUTOMATION / SKILLS</span><h1>技能中心</h1><p>每项技能都是独立模块，声明指令、能力边界与未来的 OpenAI 工具链。</p></div><span className="soft-badge large">8 个技能模块</span></div><SkillSettingsPanel bots={bots} selected={selected} overview={skillOverview} run={run} /><div className="skills-notice"><div className="notice-icon">✦</div><div><strong>模块化设计已就绪</strong><p>后续新增技能只需在 <code>apps/server/src/core/skills/</code> 添加独立 JS 文件，再注册到技能目录。</p></div><span className="status-chip">对话功能暂未启用</span></div><div className="skills-grid">{skills.map((skill) => { const enabledCount = bots.filter((bot) => bot.skills?.[skill.key as SkillKey]?.enabled).length; return <article className="skill-card" key={skill.key}><div className="skill-card-top"><span className="skill-icon">{skill.icon}</span><span className="status-chip">{enabledCount ? `${enabledCount} 个机器人启用` : skill.status}</span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-commands">{skill.commands.map((command) => <code key={command}>{command}</code>)}</div><div className="skill-card-foot"><span>模块文件</span><strong>{skill.key}.js</strong><button className="icon-button" title="查看使用方法" onClick={() => onOpenSkill(skill.key)}>↗</button></div></article>; })}</div></>;
+  return <><div className="page-heading compact"><div><span className="eyebrow">AUTOMATION / SKILLS</span><h1>技能中心</h1><p>每项技能都是独立模块，声明指令、能力边界与未来的 OpenAI 工具链。</p></div><span className="soft-badge large">8 个技能模块</span></div><SkillSettingsPanel bots={bots} selected={selected} overview={skillOverview} run={run} /><div className="skills-notice"><div className="notice-icon">✦</div><div><strong>模块化设计已就绪</strong><p>后续新增技能只需在 <code>apps/server/src/core/skills/</code> 添加独立 JS 文件，再注册到技能目录。</p></div><span className="status-chip">对话功能暂未启用</span></div><div className="skills-grid">{skills.map((skill) => { const enabledCount = bots.filter((bot) => bot.skills?.[skill.key as SkillKey]?.enabled).length; return <article className="skill-card" key={skill.key}><div className="skill-card-top"><span className="skill-icon">{skill.icon}</span><span className="status-chip">{enabledCount ? `${enabledCount} 个机器人启用` : skill.status}</span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-capabilities">{skill.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div><div className="skill-commands">{skill.commands.map((command) => <code key={command}>{command}</code>)}</div><div className="skill-card-foot"><span>模块文件</span><strong>{skill.key}.js</strong><button className="icon-button" title="查看使用方法" onClick={() => onOpenSkill(skill.key)}>↗</button></div></article>; })}</div></>;
 }
 
 const defaultSkillSettings = (): SkillSettings => ({
@@ -361,58 +388,168 @@ function MiningSkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
   const currentBot = bots.find((bot) => bot.id === botId) || selected;
   const region = currentBot?.region;
   const [mode, setMode] = useState<'blacklist' | 'whitelist'>(region?.mode === 'whitelist' ? 'whitelist' : 'blacklist');
-  const [coordinates, setCoordinates] = useState(region ? [region.bounds.minX, region.bounds.minY, region.bounds.minZ, region.bounds.maxX, region.bounds.maxY, region.bounds.maxZ].join(', ') : '0, 0, 0, 0, 0, 0');
-  const [allow, setAllow] = useState((region?.allow || []).filter((item) => !['air', 'cave_air', 'void_air'].includes(item)).join(', '));
-  const [deny, setDeny] = useState((region?.customDeny || []).join(', '));
+  const [cornerOne, setCornerOne] = useState(region ? [region.bounds.minX, region.bounds.minY, region.bounds.minZ].join(', ') : '0, 0, 0');
+  const [cornerTwo, setCornerTwo] = useState(region ? [region.bounds.maxX, region.bounds.maxY, region.bounds.maxZ].join(', ') : '0, 0, 0');
+  const [allow, setAllow] = useState<string[]>((region?.allow || []).filter((item) => !['air', 'cave_air', 'void_air'].includes(item)));
+  const [deny, setDeny] = useState<string[]>(region?.customDeny || []);
+  const [category, setCategory] = useState('全部');
+  const [search, setSearch] = useState('');
+  const [customBlock, setCustomBlock] = useState('');
   const [error, setError] = useState('');
+  const selectedBlocks = mode === 'whitelist' ? allow : deny;
+  const selectedSet = useMemo(() => new Set(selectedBlocks), [selectedBlocks]);
+  const visibleBlocks = miningBlocks.filter((block) => (category === '全部' || block.category === category) && (!search.trim() || `${block.name} ${block.id}`.toLowerCase().includes(search.trim().toLowerCase())));
+
   function selectBot(id: string) {
-    setError('');
     const next = bots.find((bot) => bot.id === id);
     setBotId(id);
+    setError('');
     if (next?.region) {
       setMode(next.region.mode === 'whitelist' ? 'whitelist' : 'blacklist');
-      setCoordinates([next.region.bounds.minX, next.region.bounds.minY, next.region.bounds.minZ, next.region.bounds.maxX, next.region.bounds.maxY, next.region.bounds.maxZ].join(', '));
-      setAllow(next.region.allow.join(', '));
-      setDeny((next.region.customDeny || []).join(', '));
+      setCornerOne([next.region.bounds.minX, next.region.bounds.minY, next.region.bounds.minZ].join(', '));
+      setCornerTwo([next.region.bounds.maxX, next.region.bounds.maxY, next.region.bounds.maxZ].join(', '));
+      setAllow(next.region.allow.filter((item) => !['air', 'cave_air', 'void_air'].includes(item)));
+      setDeny(next.region.customDeny || []);
+    } else {
+      setMode('blacklist');
+      setCornerOne('0, 0, 0');
+      setCornerTwo('0, 0, 0');
+      setAllow([]);
+      setDeny([]);
     }
   }
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    const values = coordinates.split(/[,\s]+/).map(Number);
-    if (values.length !== 6 || values.some((value) => !Number.isInteger(value))) {
-      setError('请输入 6 个整数坐标，例如：-30, 60, -30, 30, 90, 30');
+
+  function toggleBlock(id: string) {
+    const setter = mode === 'whitelist' ? setAllow : setDeny;
+    setter((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function addCustomBlocks() {
+    const tokens = customBlock.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    if (!tokens.length) return;
+    const resolved = tokens.map((token) => {
+      const match = miningBlocks.find((block) => block.id === token.replace(/^minecraft:/, '') || block.name === token);
+      return match?.id || token.replace(/^minecraft:/, '').toLowerCase();
+    }).filter((id) => !miningBlocks.find((block) => block.id === id)?.protected);
+    const setter = mode === 'whitelist' ? setAllow : setDeny;
+    setter((current) => [...new Set([...current, ...resolved])]);
+    setCustomBlock('');
+  }
+
+  function applyPreset(preset: 'ores' | 'terrain' | 'clear') {
+    const values = preset === 'clear' ? [] : miningBlocks.filter((block) => !block.protected && (preset === 'ores' ? block.category === '矿石' : ['地形', '自然'].includes(block.category))).map((block) => block.id);
+    if (mode === 'whitelist') setAllow(values);
+    else setDeny(values);
+  }
+
+  function parseCorner(value: string) {
+    const values = value.split(/[,，\s]+/).map(Number);
+    return values.length === 3 && values.every(Number.isInteger) ? values : null;
+  }
+
+  async function save(startMining = false) {
+    const first = parseCorner(cornerOne);
+    const second = parseCorner(cornerTwo);
+    if (!first || !second) {
+      setError('两个角点都必须包含 3 个整数，例如：-30, 60, -30。');
       return;
     }
     setError('');
-    await run(() => configureRegion(botId, { x1: values[0], y1: values[1], z1: values[2], x2: values[3], y2: values[4], z2: values[5], mode, allow: allow.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean), deny: deny.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean) }), true);
+    await run(() => configureRegion(botId, { x1: first[0], y1: first[1], z1: first[2], x2: second[0], y2: second[1], z2: second[2], mode, allow, deny }), true);
+    if (startMining) await run(() => sendCommand(botId, 'area on'), true);
   }
-  return <section className="mining-settings"><div className="settings-heading"><div><span className="eyebrow">WEB CONFIGURATION</span><h3>区域挖矿设置</h3></div><span className="soft-badge">容器、基岩、流体始终保护</span></div><label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label><label>两个角点 <input value={coordinates} onChange={(event) => setCoordinates(event.target.value)} placeholder="x1, y1, z1, x2, y2, z2" /></label><div className="mode-switch"><button type="button" className={mode === 'blacklist' ? 'active' : ''} onClick={() => setMode('blacklist')}>黑名单：挖除未列出的方块</button><button type="button" className={mode === 'whitelist' ? 'active' : ''} onClick={() => setMode('whitelist')}>白名单：只挖列出的方块</button></div><label>{mode === 'whitelist' ? '允许挖掘的方块' : '禁止挖掘的方块'}<input value={mode === 'whitelist' ? allow : deny} onChange={(event) => mode === 'whitelist' ? setAllow(event.target.value) : setDeny(event.target.value)} placeholder="例如 chest, barrel, diamond_ore" /></label><p className="muted">多个值用逗号或空格分隔。保存后游戏内只需使用 <code>area on</code> / <code>area off</code>，不必手动拼接长指令。{currentBot?.region?.pausedReason ? ` 当前暂停：${currentBot.region.pausedReason}` : ''}</p>{error && <p className="form-error">{error}</p>}<button type="button" className="primary" disabled={!botId} onClick={save}>保存区域配置</button></section>;
+
+  const customSelected = selectedBlocks.filter((id) => !miningBlocks.some((block) => block.id === id));
+  return <section className="mining-settings">
+    <div className="settings-heading"><div><span className="eyebrow">VISUAL BLOCK POLICY</span><h3>区域清空与方块策略</h3></div><span className="soft-badge">容器、基岩、流体永久保护</span></div>
+    <div className="mining-top-grid"><label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label><label>角点 1<input value={cornerOne} onChange={(event) => setCornerOne(event.target.value)} placeholder="x, y, z" /></label><label>角点 2<input value={cornerTwo} onChange={(event) => setCornerTwo(event.target.value)} placeholder="x, y, z" /></label></div>
+    <div className="mode-switch mining-mode"><button type="button" className={mode === 'blacklist' ? 'active' : ''} onClick={() => setMode('blacklist')}><b>黑名单</b><small>选中的方块不挖，其余安全方块清空</small></button><button type="button" className={mode === 'whitelist' ? 'active' : ''} onClick={() => setMode('whitelist')}><b>白名单</b><small>只挖选中的方块</small></button></div>
+    <div className="block-policy-toolbar"><div className="block-categories">{['全部', '矿石', '地形', '自然', '建筑', '永久保护'].map((item) => <button type="button" className={category === item ? 'active' : ''} key={item} onClick={() => setCategory(item)}>{item}</button>)}</div><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索中文名或方块 ID" /></div>
+    <div className="block-preset-row"><span>快速选择</span><button type="button" onClick={() => applyPreset('ores')}>全部矿石</button><button type="button" onClick={() => applyPreset('terrain')}>常见地形与自然方块</button><button type="button" onClick={() => applyPreset('clear')}>清空选择</button></div>
+    <div className="block-catalog">{visibleBlocks.map((block) => <button type="button" key={block.id} disabled={block.protected} className={`block-option ${selectedSet.has(block.id) ? 'selected' : ''} ${block.protected ? 'protected' : ''}`} onClick={() => toggleBlock(block.id)}><span className="block-swatch" style={{ background: block.tone }} /><span><strong>{block.name}</strong><small>minecraft:{block.id}</small></span><i>{block.protected ? '锁定保护' : selectedSet.has(block.id) ? (mode === 'whitelist' ? '允许挖' : '禁止挖') : '未选择'}</i></button>)}</div>
+    <div className="custom-block-row"><label>补充自定义方块<input value={customBlock} onChange={(event) => setCustomBlock(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addCustomBlocks(); } }} placeholder="输入中文名或 minecraft:block_id" /></label><button type="button" className="secondary" onClick={addCustomBlocks}>加入当前列表</button></div>
+    {customSelected.length > 0 && <div className="selected-blocks"><span>自定义映射：</span>{customSelected.map((id) => <button type="button" key={id} onClick={() => toggleBlock(id)}>{id} ×</button>)}</div>}
+    <p className="muted">网页保存的中文选择会转换为真实方块 ID。挖矿时如果需要离开，会建立临时检查点；补给、睡觉或卸货结束后自动返回继续。{currentBot?.region?.pausedReason ? ` 当前暂停：${currentBot.region.pausedReason}` : ''}</p>
+    {error && <p className="form-error">{error}</p>}
+    <div className="drawer-actions mining-actions"><button type="button" className="secondary" disabled={!botId} onClick={() => save(false)}>仅保存设置</button><button type="button" className="primary" disabled={!botId} onClick={() => save(true)}>保存并开始挖矿</button><button type="button" className="secondary" disabled={!botId} onClick={() => run(() => sendCommand(botId, 'area off'), true)}>暂停挖矿</button></div>
+  </section>;
 }
 
 function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selected?: BotStatus; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {
   const [botId, setBotId] = useState(selected?.id || bots[0]?.id || '');
   const currentBot = bots.find((bot) => bot.id === botId) || selected;
   const [points, setPoints] = useState<SupplyPoint[]>(currentBot?.resupplyPoints || []);
-  const [name, setName] = useState('主基地补给点');
-  const [dimension, setDimension] = useState('overworld');
-  const [anchor, setAnchor] = useState('0, 64, 0');
-  const [bed, setBed] = useState('');
-  const [containers, setContainers] = useState('0, 64, 0, mixed');
+  const [name, setName] = useState('综合补给站');
+  const [home, setHome] = useState('补给');
+  const [roles, setRoles] = useState<SupplyRole[]>(['food', 'pickaxe', 'sleep']);
+  const [scanRadius, setScanRadius] = useState(8);
   const [error, setError] = useState('');
-  function selectBot(id: string) { setBotId(id); setPoints(bots.find((bot) => bot.id === id)?.resupplyPoints || []); }
-  function parseCoordinate(value: string) { const values = value.split(/[,\t\s]+/).map(Number); return values.length === 3 && values.every(Number.isFinite) ? { x: values[0], y: values[1], z: values[2] } : null; }
-  function addPoint() {
-    const position = parseCoordinate(anchor);
-    if (!position) { setError('补给点坐标必须是 3 个数字。'); return; }
-    const bedPosition = bed.trim() ? parseCoordinate(bed) : null;
-    if (bed.trim() && !bedPosition) { setError('床坐标必须是 3 个数字。'); return; }
-    const parsedContainers = containers.split(/\n+/).map((line) => line.trim()).filter(Boolean).map((line) => { const values = line.split(/[,\t\s]+/); const point = parseCoordinate(values.slice(0, 3).join(',')); return point ? { ...point, role: (['storage', 'pickup', 'mixed'].includes(values[3]) ? values[3] : 'mixed') as 'storage' | 'pickup' | 'mixed' } : null; }).filter((value): value is SupplyPoint['containers'][number] => Boolean(value));
-    if (!parsedContainers.length) { setError('至少配置一个箱子/容器坐标。'); return; }
-    setPoints((current) => [...current, { id: `point-${Date.now()}`, name, dimension: dimension || null, ...position, bed: bedPosition, containers: parsedContainers, enabled: true, priority: 0 }]);
+
+  function selectBot(id: string) {
+    setBotId(id);
+    setPoints(bots.find((bot) => bot.id === id)?.resupplyPoints || []);
     setError('');
   }
-  async function save() { if (!botId) return; await run(() => configureSupply(botId, points), true); }
-  return <section className="supply-settings"><div className="settings-heading"><div><span className="eyebrow">SUPPLY STATION</span><h3>固定补给点</h3></div><span className="soft-badge">只访问这里的床与容器</span></div><label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label><div className="form-grid"><label>补给点名称<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>维度<select value={dimension} onChange={(event) => setDimension(event.target.value)}><option value="overworld">主世界</option><option value="the_nether">下界</option><option value="the_end">末地</option></select></label><label>锚点坐标<input value={anchor} onChange={(event) => setAnchor(event.target.value)} placeholder="x, y, z" /></label><label>床坐标（可选）<input value={bed} onChange={(event) => setBed(event.target.value)} placeholder="x, y, z" /></label></div><label>容器坐标（每行一个：x, y, z, storage|pickup|mixed）<textarea value={containers} onChange={(event) => setContainers(event.target.value)} rows={3} /></label><div className="drawer-actions"><button type="button" className="secondary" onClick={addPoint}>加入补给点列表</button><button type="button" className="primary" onClick={save}>保存补给点</button></div>{error && <p className="form-error">{error}</p>}<div className="point-list">{points.length ? points.map((point) => <div className="point-row" key={point.id}><div><strong>{point.name}</strong><small>{point.dimension || '任意维度'} · {point.x}, {point.y}, {point.z} · {point.containers.length} 个容器{point.bed ? ' · 已配置床' : ''}</small></div><button type="button" className="icon-button" onClick={() => setPoints((current) => current.filter((item) => item.id !== point.id))}>×</button></div>) : <p className="muted">还没有固定补给点。未配置时机器人不会随机寻找箱子或床。</p>}</div></section>;
+
+  function toggleDraftRole(role: SupplyRole) {
+    setRoles((current) => current.includes(role) ? current.filter((item) => item !== role) : [...current, role]);
+  }
+
+  function addPoint(template?: 'supply' | 'storage') {
+    const nextHome = template === 'storage' ? '存储' : template === 'supply' ? '补给' : home.trim();
+    const nextName = template === 'storage' ? '矿物仓库' : template === 'supply' ? '综合补给站' : name.trim();
+    const nextRoles: SupplyRole[] = template === 'storage' ? ['storage'] : template === 'supply' ? ['food', 'pickaxe', 'sleep'] : roles;
+    if (!nextHome || /\s/.test(nextHome)) { setError('Home 名称不能为空且不能包含空格。'); return; }
+    if (!nextRoles.length) { setError('至少选择一个补给角色。'); return; }
+    setPoints((current) => [...current, { id: `home-${Date.now()}`, name: nextName || nextHome, home: nextHome, roles: nextRoles, dimension: null, x: null, y: null, z: null, bed: null, containers: [], scanRadius, autoDiscover: true, enabled: true, priority: template === 'storage' ? 20 : 10 }]);
+    setError('');
+  }
+
+  function updatePoint(id: string, patch: Partial<SupplyPoint>) {
+    setPoints((current) => current.map((point) => point.id === id ? { ...point, ...patch } : point));
+  }
+
+  function togglePointRole(id: string, role: SupplyRole) {
+    setPoints((current) => current.map((point) => point.id === id ? { ...point, roles: point.roles.includes(role) ? point.roles.filter((item) => item !== role) : [...point.roles, role] } : point));
+  }
+
+  function validate(nextPoints: SupplyPoint[]) {
+    for (const point of nextPoints) {
+      if (!point.home && ![point.x, point.y, point.z].every((value) => Number.isFinite(value))) return `${point.name} 没有 Home 名称，也没有可用的旧坐标锚点。`;
+      if (point.home && /\s/.test(point.home)) return `${point.name} 的 Home 名称不能包含空格。`;
+      if (!point.roles.length) return `${point.name} 至少需要一个角色。`;
+    }
+    return '';
+  }
+
+  async function save(nextPoints = points) {
+    if (!botId) return;
+    const message = validate(nextPoints);
+    if (message) { setError(message); return; }
+    setError('');
+    await run(() => configureSupply(botId, nextPoints), true);
+  }
+
+  async function initializeHome(point: SupplyPoint) {
+    const bot = bots.find((item) => item.id === botId);
+    if (!point.home) { setError('请先填写 Home 名称。'); return; }
+    if (!bot?.position || bot.state !== 'online') { setError('机器人必须在线并已加载世界坐标，才能在当前位置初始化 Home。'); return; }
+    const updated = points.map((item) => item.id === point.id ? { ...item, x: bot.position!.x, y: bot.position!.y, z: bot.position!.z, dimension: String(bot.dimension || '').replace(/^minecraft:/, '') || null } : item);
+    setPoints(updated);
+    setError('');
+    await run(() => sendCommand(botId, `sethome ${point.home}`));
+    await save(updated);
+  }
+
+  return <section className="supply-settings">
+    <div className="settings-heading"><div><span className="eyebrow">ROLE-BASED HOME STATIONS</span><h3>Home 补给与仓储映射</h3></div><span className="soft-badge">只扫描已登记 Home 附近</span></div>
+    <div className="supply-explainer"><strong>推荐结构</strong><span><code>/home 补给</code>：食物 + 镐子 + 床</span><span><code>/home 存储</code>：多个箱子 / 木桶 / 潜影盒</span><small>挖矿中离开前会自动创建临时检查点，维护完成后返回并删除。</small></div>
+    <label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label>
+    <div className="station-builder"><div className="form-grid"><label>站点名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="综合补给站" /></label><label>服务器 Home 名称<input value={home} onChange={(event) => setHome(event.target.value)} placeholder="补给" /></label><label>自动扫描半径<input type="number" min="2" max="32" value={scanRadius} onChange={(event) => setScanRadius(Math.max(2, Math.min(32, Number(event.target.value) || 8)))} /></label></div><div className="station-role-picker">{(Object.keys(supplyRoleLabels) as SupplyRole[]).map((role) => <button type="button" className={roles.includes(role) ? 'active' : ''} key={role} onClick={() => toggleDraftRole(role)}>{supplyRoleLabels[role]}</button>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={() => addPoint('supply')}>＋ 综合补给模板</button><button type="button" className="secondary" onClick={() => addPoint('storage')}>＋ 矿物仓库模板</button><button type="button" className="primary" onClick={() => addPoint()}>加入站点列表</button></div></div>
+    {error && <p className="form-error">{error}</p>}
+    <div className="home-station-list">{points.length ? points.map((point) => <article className="home-station-card" key={point.id}><div className="home-station-head"><div><input value={point.name} onChange={(event) => updatePoint(point.id, { name: event.target.value })} aria-label="站点名称" /><span>{point.home ? `/home ${point.home}` : '旧坐标补给点'}</span></div><label className="toggle-row compact-toggle"><input type="checkbox" checked={point.enabled} onChange={(event) => updatePoint(point.id, { enabled: event.target.checked })} /><span />启用</label><button type="button" className="icon-button" onClick={() => setPoints((current) => current.filter((item) => item.id !== point.id))}>×</button></div><div className="home-station-fields"><label>Home 名称<input value={point.home || ''} onChange={(event) => updatePoint(point.id, { home: event.target.value || null })} placeholder="补给" /></label><label>扫描半径<input type="number" min="2" max="32" value={point.scanRadius || 8} onChange={(event) => updatePoint(point.id, { scanRadius: Math.max(2, Math.min(32, Number(event.target.value) || 8)) })} /></label><label>优先级<input type="number" min="0" max="100" value={point.priority || 0} onChange={(event) => updatePoint(point.id, { priority: Number(event.target.value) || 0 })} /></label></div><div className="station-role-picker compact">{(Object.keys(supplyRoleLabels) as SupplyRole[]).map((role) => <button type="button" className={point.roles.includes(role) ? 'active' : ''} key={role} onClick={() => togglePointRole(point.id, role)}>{supplyRoleLabels[role]}</button>)}</div><div className="station-anchor"><span>{[point.x, point.y, point.z].every((value) => Number.isFinite(value)) ? `安全锚点 ${point.x}, ${point.y}, ${point.z} · ${point.dimension || '任意维度'}` : '尚未记录安全锚点，请让机器人站在 Home 中初始化'}</span><label><input type="checkbox" checked={point.autoDiscover !== false} onChange={(event) => updatePoint(point.id, { autoDiscover: event.target.checked })} /> 自动发现附近容器与床</label></div><div className="home-station-actions"><button type="button" className="secondary" disabled={currentBot?.state !== 'online' || !point.home} onClick={() => initializeHome(point)}>在当前位置 /sethome 并记录锚点</button><button type="button" className="secondary" disabled={currentBot?.state !== 'online' || !point.home} onClick={() => run(() => sendCommand(botId, `home ${point.home}`))}>测试前往</button></div></article>) : <p className="muted">还没有 Home 站点。先添加“综合补给模板”和“矿物仓库模板”，再让机器人分别站到对应位置初始化。</p>}</div>
+    <div className="drawer-actions supply-save-actions"><button type="button" className="primary" onClick={() => save()}>保存全部 Home 映射</button></div>
+  </section>;
 }
 
 function FirstPersonControls({ botId, run }: { botId: string; run: (action: () => Promise<unknown>, refresh?: boolean) => Promise<void> }) {

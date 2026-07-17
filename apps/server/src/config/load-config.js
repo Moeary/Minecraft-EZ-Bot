@@ -40,6 +40,7 @@ function normalizeSkillSettings(base = {}, override = {}) {
 }
 
 function coordinate(value) {
+  if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -51,6 +52,8 @@ function normalizeCoordinateObject(value) {
   const z = coordinate(value.z);
   return [x, y, z].every(Number.isFinite) ? { x, y, z } : null;
 }
+
+const SUPPLY_ROLES = ['food', 'pickaxe', 'sleep', 'storage'];
 
 function normalizeSupplyPoint(point, index = 0) {
   if (!point || typeof point !== 'object') return null;
@@ -64,16 +67,31 @@ function normalizeSupplyPoint(point, index = 0) {
   const legacyPosition = normalizeCoordinateObject(point);
   if (!containers.length && legacyPosition) containers.push({ ...legacyPosition, role: 'mixed' });
   const anchor = legacyPosition || containers[0] || null;
-  if (!anchor) return null;
+  const home = String(point.home || point.homeName || '').trim().replace(/^\/?home\s+/i, '') || null;
+  if (!anchor && !home) return null;
+
+  const requestedRoles = Array.isArray(point.roles) ? point.roles : [];
+  const roles = [...new Set(requestedRoles.map((role) => String(role).toLowerCase()).filter((role) => SUPPLY_ROLES.includes(role)))];
+  if (!roles.length) {
+    if (point.bed) roles.push('sleep');
+    if (containers.some((container) => container.role !== 'pickup')) roles.push('storage');
+    if (containers.some((container) => container.role !== 'storage')) roles.push('food', 'pickaxe');
+    if (!roles.length) roles.push('food', 'pickaxe', 'sleep', 'storage');
+  }
+
   return {
     id: String(point.id || `point-${index + 1}`).trim() || `point-${index + 1}`,
     name: String(point.name || `补给点 ${index + 1}`).trim() || `补给点 ${index + 1}`,
+    home,
+    roles: [...new Set(roles)],
     dimension: point.dimension ? String(point.dimension).replace(/^minecraft:/, '').trim() : null,
-    x: anchor.x,
-    y: anchor.y,
-    z: anchor.z,
+    x: anchor?.x ?? null,
+    y: anchor?.y ?? null,
+    z: anchor?.z ?? null,
     bed: normalizeCoordinateObject(point.bed),
     containers,
+    scanRadius: Math.max(2, Math.min(32, Number.isFinite(Number(point.scanRadius)) ? Math.round(Number(point.scanRadius)) : 8)),
+    autoDiscover: point.autoDiscover === undefined ? Boolean(home) : point.autoDiscover !== false,
     enabled: point.enabled !== false,
     priority: Number.isFinite(Number(point.priority)) ? Number(point.priority) : 0
   };

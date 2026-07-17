@@ -144,3 +144,38 @@ test('normalizes and persists fixed supply stations with beds and multiple conta
   assert.equal(saved.bots[0].resupplyPoints[0].name, '主补给站');
   assert.equal(saved.bots[0].resupplyPoints[0].containers.length, 2);
 });
+test('normalizes Home-based role stations and preserves legacy compatibility', (t) => {
+  const config = createConfig();
+  t.after(() => fs.rmSync(config.rootDir, { recursive: true, force: true }));
+  const manager = new BotManager(config);
+  manager.add({ id: 'home-miner', host: 'localhost', username: 'HomeMiner', auth: 'offline', viewer: { enabled: false } });
+
+  const result = manager.configureSupply('home-miner', [
+    {
+      id: 'supply-home',
+      name: '综合补给',
+      home: '/home 补给',
+      roles: ['food', 'pickaxe', 'sleep'],
+      scanRadius: 12,
+      autoDiscover: true
+    },
+    {
+      id: 'storage-home',
+      name: '矿物仓库',
+      home: '存储',
+      roles: ['storage'],
+      scanRadius: 16
+    }
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.points[0].home, '补给');
+  assert.deepEqual(result.points[0].roles, ['food', 'pickaxe', 'sleep']);
+  assert.equal(result.points[0].x, null);
+  assert.equal(result.points[0].scanRadius, 12);
+  assert.equal(result.points[1].home, '存储');
+  assert.deepEqual(result.points[1].roles, ['storage']);
+  const saved = JSON.parse(fs.readFileSync(config.botsPath, 'utf8'));
+  assert.equal(saved.bots[0].resupplyPoints[1].home, '存储');
+  assert.deepEqual(saved.bots[0].resupplyPoints[1].roles, ['storage']);
+});

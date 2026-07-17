@@ -32,6 +32,16 @@ const REGION_ALIASES = {
   beds: [...REGION_PROTECTED_NAMES].filter((name) => name.endsWith('_bed') || name === 'bed')
 };
 const PLUG_BLOCK_NAMES = ['cobblestone', 'stone', 'deepslate', 'dirt', 'netherrack'];
+const SUPPLY_CONTAINER_NAMES = new Set(['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box']);
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function isSupplyContainerName(name) {
+  const normalized = cleanBlockName(name);
+  return SUPPLY_CONTAINER_NAMES.has(normalized) || normalized.endsWith('_shulker_box');
+}
 
 function cleanBlockName(name) {
   return String(name || '').toLowerCase().replace(/^minecraft:/, '').trim();
@@ -86,75 +96,6 @@ class ManagedBot extends EventEmitter {
     this.viewerStarted = false;
     this.alertLastSent = new Map();
     this.activeAlerts = new Set();
-  }
-
-  effectiveSkillConfig() {
-    return normalizeSkillSettings(this.config.defaults?.skills || {}, this.definition.skills || {});
-  }
-
-  updateSkillConfig(settings) {
-    this.skillConfig = normalizeSkillSettings(this.config.defaults?.skills || {}, settings || {});
-    this.taskScheduler.configure(this.skillConfig);
-    if (this.bot?.entity) this.applyConfiguredSkills();
-    this.emit('state', this.publicStatus());
-    return this.skillConfig;
-  }
-
-  applyConfiguredSkills() {
-    const skills = this.effectiveSkillConfig();
-    this.skillConfig = skills;
-    this.taskScheduler.configure(skills);
-    this.chatLogEnabled = skills['chat-command'].enabled;
-    if (skills.combat.enabled) {
-      this.killAuraEnabled = true;
-    } else {
-      this.killAuraEnabled = false;
-      this.bot?.pvp?.stop?.();
-    }
-    if (skills.supply.enabled) {
-      this.setSupply('on', false);
-      this.resupplyEnabled = true;
-    } else {
-      this.setSupply('off', false);
-      this.resupplyEnabled = false;
-    }
-    if (skills.survival.enabled) {
-      this.sleepEnabled = true;
-      this.resupplyEnabled = true;
-      this.startMaintenanceLoop();
-    } else {
-      this.sleepEnabled = false;
-      if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
-      this.maintenanceTimer = null;
-      if (!skills.supply.enabled) this.resupplyEnabled = false;
-    }
-    if (!skills.fishing.enabled && this.fishing) {
-      this.fishing = false;
-      if (this.fishingTimer) clearTimeout(this.fishingTimer);
-      this.fishingTimer = null;
-    } else if (skills.fishing.enabled && !this.fishing) {
-      this.startFishing(false);
-    }
-    if (!skills.mining.enabled) {
-      this.mining = false;
-      this.miningTarget = null;
-      if (this.miningTimer) clearTimeout(this.miningTimer);
-      this.miningTimer = null;
-      if (this.regionMining) this.stopRegionMining();
-    } else if (this.regionPlan && !this.regionMining && !this.mining) {
-      this.startRegionMining(false);
-    }
-    if (skills.pathfinder.enabled) this.log('Pathfinder skill enabled; navigation is available to other skills.');
-  }
-
-  configureSupplyPoints(points = []) {
-    this.resupplyPoints = Array.isArray(points) ? points.map(normalizeSupplyPoint).filter(Boolean) : [];
-    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point, containers: point.containers.map((container) => ({ ...container })), bed: point.bed ? { ...point.bed } : null })) } : bot);
-    saveBotsConfig(this.config, next);
-    this.config.bots = next;
-    this.definition = next.find((bot) => bot.id === this.id) || this.definition;
-    this.emit('state', this.publicStatus());
-    return this.resupplyPoints;
   }
 
   log(message, level = 'info') {
@@ -394,9 +335,18 @@ class ManagedBot extends EventEmitter {
     if (skills.pathfinder.enabled) this.log('Pathfinder skill enabled; navigation is available to other skills.');
   }
 
+  serializedSupplyPoints() {
+    return this.resupplyPoints.map((point) => ({
+      ...point,
+      roles: [...(point.roles || [])],
+      containers: (point.containers || []).map((container) => ({ ...container })),
+      bed: point.bed ? { ...point.bed } : null
+    }));
+  }
+
   configureSupplyPoints(points = []) {
     this.resupplyPoints = Array.isArray(points) ? points.map(normalizeSupplyPoint).filter(Boolean) : [];
-    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point, containers: point.containers.map((container) => ({ ...container })), bed: point.bed ? { ...point.bed } : null })) } : bot);
+    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.serializedSupplyPoints() } : bot);
     saveBotsConfig(this.config, next);
     this.config.bots = next;
     this.definition = next.find((bot) => bot.id === this.id) || this.definition;
@@ -459,7 +409,7 @@ class ManagedBot extends EventEmitter {
       return { command: tokens[1], args: tokens.slice(2) };
     }
 
-    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip', 'area', 'region', 'minearea', 'sleep', 'resupply', 'unseal', 'look']);
+    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'delhome', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip', 'area', 'region', 'minearea', 'sleep', 'resupply', 'unseal', 'look']);
     if (knownCommands.has(tokens[0].toLowerCase()) && this.isTarget(tokens[tokens.length - 1])) {
       return { command: tokens[0], args: tokens.slice(1, -1) };
     }
@@ -483,9 +433,10 @@ class ManagedBot extends EventEmitter {
       if (!recipient) return { ok: false, message: 'Usage: come <PlayerName>' };
       return this.sendChat(`/tpa ${recipient}`);
     }
-    if (normalized === 'sethome' || normalized === 'home') {
-      const home = args[0] || '';
-      return this.sendChat(`/${normalized} ${home}`.trim());
+    if (normalized === 'sethome' || normalized === 'home' || normalized === 'delhome') {
+      const home = args.join(' ').trim();
+      if (!home) return { ok: false, message: `Usage: ${normalized} <name>` };
+      return this.sendChat(`/${normalized} ${home}`);
     }
     if (normalized === 'cmd') {
       if (context.source === 'web' && !this.config.web.allowRawCommands) {
@@ -1124,7 +1075,7 @@ class ManagedBot extends EventEmitter {
 
   persistResupplyPoints() {
     try {
-      const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.resupplyPoints.map((point) => ({ ...point })) } : bot);
+      const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, resupplyPoints: this.serializedSupplyPoints() } : bot);
       saveBotsConfig(this.config, next);
       this.config.bots = next;
       this.definition = next.find((bot) => bot.id === this.id) || this.definition;
@@ -1192,35 +1143,182 @@ class ManagedBot extends EventEmitter {
     return String(this.bot?.game?.dimension || '').replace(/^minecraft:/, '');
   }
 
-  matchingSupplyPoints() {
+  supplyPointSupports(point, role) {
+    return !role || !Array.isArray(point.roles) || point.roles.length === 0 || point.roles.includes(role);
+  }
+
+  matchingSupplyPoints(role = null) {
     const dimension = this.currentDimension();
-    return this.resupplyPoints.filter((point) => point.enabled !== false && (!point.dimension || point.dimension === dimension));
+    return this.resupplyPoints.filter((point) => point.enabled !== false && this.supplyPointSupports(point, role) && (point.home || !point.dimension || point.dimension === dimension));
+  }
+
+  checkpointName() {
+    const id = String(this.id || 'bot').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 24) || 'bot';
+    return `_mcbot_${id}_checkpoint`;
+  }
+
+  hasSupplyAnchor(point) {
+    return [point?.x, point?.y, point?.z].every(Number.isFinite);
+  }
+
+  isNearSupplyAnchor(point) {
+    if (!this.bot?.entity || !this.hasSupplyAnchor(point)) return false;
+    if (point.dimension && point.dimension !== this.currentDimension()) return false;
+    const radius = Math.max(6, Number(point.scanRadius) || 8) + 3;
+    return this.bot.entity.position.distanceTo(new Vec3(point.x, point.y, point.z)) <= radius;
+  }
+
+  async waitForTeleport(startPosition, startDimension, timeoutMs = 6500) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.bot?.entity && Date.now() < deadline) {
+      const changedDimension = this.currentDimension() !== startDimension;
+      const moved = this.bot.entity.position.distanceTo(startPosition) > 2;
+      if (changedDimension || moved) {
+        await delay(450);
+        return true;
+      }
+      await delay(200);
+    }
+    return false;
+  }
+
+  async issueServerCommand(command, waitForTeleport = false) {
+    if (!this.bot?.entity) return false;
+    const startPosition = this.bot.entity.position.clone();
+    const startDimension = this.currentDimension();
+    this.bot.chat(command.startsWith('/') ? command : `/${command}`);
+    if (!waitForTeleport) {
+      await delay(300);
+      return true;
+    }
+    return this.waitForTeleport(startPosition, startDimension);
+  }
+
+  async withSupplyPoint(point, taskName, action) {
+    const release = await this.taskScheduler.acquire(taskName);
+    const shouldCheckpoint = Boolean(point.home && (this.mining || this.regionMining));
+    const checkpoint = shouldCheckpoint ? this.checkpointName() : null;
+    const checkpointAnchor = checkpoint && this.bot?.entity ? {
+      position: this.bot.entity.position.clone(),
+      dimension: this.currentDimension()
+    } : null;
+    try {
+      if (checkpoint) {
+        await this.issueServerCommand(`/sethome ${checkpoint}`);
+        this.log(`Temporary mining checkpoint saved as ${checkpoint}.`);
+      }
+      if (point.home) {
+        const moved = await this.issueServerCommand(`/home ${point.home}`, true);
+        const verifiedAnchor = this.hasSupplyAnchor(point) && this.isNearSupplyAnchor(point);
+        if (!moved && !verifiedAnchor) {
+          throw new Error(`home ${point.home} did not teleport the bot; initialize or verify this Home before enabling automation`);
+        }
+        if (this.hasSupplyAnchor(point) && !this.isNearSupplyAnchor(point)) {
+          throw new Error(`home ${point.home} landed outside the configured anchor; refusing to operate at an unsafe location`);
+        }
+        this.log(`Arrived at configured Home ${point.home} for ${point.name}.`);
+      }
+      return await action();
+    } finally {
+      if (checkpoint && this.bot?.entity) {
+        try {
+          const returned = await this.issueServerCommand(`/home ${checkpoint}`, true);
+          const nearCheckpoint = checkpointAnchor && checkpointAnchor.dimension === this.currentDimension()
+            && this.bot.entity.position.distanceTo(checkpointAnchor.position) <= 8;
+          if (returned || nearCheckpoint) {
+            await this.issueServerCommand(`/delhome ${checkpoint}`);
+            this.log(`Returned to mining checkpoint and removed ${checkpoint}.`);
+          } else {
+            this.log(`Could not verify return to temporary checkpoint ${checkpoint}; keeping it for manual recovery.`, 'warn');
+          }
+        } catch (error) {
+          this.log(`Could not return to temporary checkpoint ${checkpoint}: ${error.message}; keeping it for manual recovery.`, 'warn');
+        }
+      }
+      release();
+    }
+  }
+  supplyContainerRole(point) {
+    const canStore = this.supplyPointSupports(point, 'storage');
+    const canPickup = this.supplyPointSupports(point, 'food') || this.supplyPointSupports(point, 'pickaxe');
+    if (canStore && canPickup) return 'mixed';
+    return canStore ? 'storage' : 'pickup';
   }
 
   supplyContainers(point) {
-    return point.containers?.length ? point.containers : [{ x: point.x, y: point.y, z: point.z, role: 'mixed' }];
+    const entries = [];
+    const seen = new Set();
+    const add = (position, role) => {
+      if (![position?.x, position?.y, position?.z].every(Number.isFinite)) return;
+      const key = `${position.x},${position.y},${position.z}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      entries.push({ x: position.x, y: position.y, z: position.z, role });
+    };
+    for (const container of point.containers || []) add(container, container.role || this.supplyContainerRole(point));
+    if (point.autoDiscover && point.home && this.bot?.findBlocks) {
+      try {
+        const positions = this.bot.findBlocks({
+          matching: (block) => isSupplyContainerName(block?.name),
+          maxDistance: Math.max(2, Math.min(32, Number(point.scanRadius) || 8)),
+          count: 64
+        });
+        for (const position of positions) add(position, this.supplyContainerRole(point));
+      } catch (error) {
+        this.log(`Could not scan containers near Home ${point.home}: ${error.message}`, 'warn');
+      }
+    }
+    if (!entries.length && !point.home && this.hasSupplyAnchor(point)) add(point, this.supplyContainerRole(point));
+    if (this.bot?.entity) entries.sort((a, b) => this.bot.entity.position.distanceTo(new Vec3(a.x, a.y, a.z)) - this.bot.entity.position.distanceTo(new Vec3(b.x, b.y, b.z)));
+    return entries;
+  }
+
+  findSupplyBed(point) {
+    const bot = this.bot;
+    if (!bot) return null;
+    if (point.bed) {
+      const configured = bot.blockAt(new Vec3(point.bed.x, point.bed.y, point.bed.z));
+      if (configured && (configured.name === 'bed' || String(configured.name).endsWith('_bed'))) return configured;
+    }
+    if (point.autoDiscover && point.home && bot.findBlock) {
+      return bot.findBlock({
+        matching: (block) => block?.name === 'bed' || String(block?.name || '').endsWith('_bed'),
+        maxDistance: Math.max(2, Math.min(32, Number(point.scanRadius) || 8))
+      });
+    }
+    return null;
   }
 
   async maybeSleep() {
     const bot = this.bot;
-    if (!bot?.time || bot.isSleeping || !['overworld', 'minecraft:overworld'].includes(bot.game?.dimension)) return;
+    if (!bot?.time || bot.isSleeping) return;
     const time = Number(bot.time.timeOfDay);
     if (!(time >= 12541 && time <= 23458)) return;
-    const point = this.matchingSupplyPoints().find((candidate) => candidate.bed);
-    if (!point?.bed) {
-      this.resourceAlert('no-supply-bed', true, '夜晚到了，但配置的补给点没有设置床位。', 120000);
+    const points = this.matchingSupplyPoints('sleep').sort((a, b) => b.priority - a.priority);
+    if (!points.length) {
+      this.resourceAlert('no-supply-bed', true, '夜晚到了，但没有配置带“睡觉”角色的 Home 补给点。', 120000);
       return;
     }
-    const bed = bot.blockAt(new Vec3(point.bed.x, point.bed.y, point.bed.z));
-    if (!bed || !String(bed.name).endsWith('bed') || !bot.sleep) {
-      this.resourceAlert('no-supply-bed', true, `配置的补给点床位不可用：${point.name} (${point.bed.x},${point.bed.y},${point.bed.z})。`, 120000);
-      return;
+    for (const point of points) {
+      try {
+        const slept = await this.withSupplyPoint(point, 'survival', async () => {
+          const bed = this.findSupplyBed(point);
+          if (!bed || !bot.sleep) return false;
+          await this.moveToBlock(bed, 'survival');
+          if (!this.sleepEnabled || bot.isSleeping) return true;
+          await bot.sleep(bed);
+          this.log(`Sleeping at configured supply Home: ${point.name}.`);
+          return true;
+        });
+        if (slept) {
+          this.resourceAlert('no-supply-bed', false, '');
+          return;
+        }
+      } catch (error) {
+        this.log(`Sleep point ${point.name} failed: ${error.message}`, 'warn');
+      }
     }
-    this.resourceAlert('no-supply-bed', false, '');
-    await this.moveToBlock(bed, 'survival');
-    if (!this.sleepEnabled || bot.isSleeping) return;
-    await bot.sleep(bed);
-    this.log(`Sleeping at configured supply point: ${point.name}.`);
+    this.resourceAlert('no-supply-bed', true, '已到达睡觉补给点，但扫描范围内没有找到可用床。', 120000);
   }
 
   isToolLow(item) {
@@ -1325,6 +1423,59 @@ class ManagedBot extends EventEmitter {
     }
   }
 
+  containerItems(container) {
+    return typeof container.containerItems === 'function' ? container.containerItems() : (container.slots || []).filter(Boolean);
+  }
+
+  async operateSupplyPoint(point, requirements) {
+    const bot = this.bot;
+    let opened = 0;
+    const result = await this.withSupplyPoint(point, 'supply', async () => {
+      const containers = this.supplyContainers(point);
+      if (!containers.length) throw new Error(`no supported chest, barrel, or shulker box was found within ${point.scanRadius || 8} blocks`);
+      for (const containerPosition of containers) {
+        if (!bot?.entity) break;
+        const block = bot.blockAt(new Vec3(containerPosition.x, containerPosition.y, containerPosition.z));
+        if (!block || !isSupplyContainerName(block.name)) continue;
+        let container = null;
+        try {
+          await this.moveToBlock(block, 'supply');
+          container = await bot.openContainer(block);
+          opened += 1;
+          const canStore = requirements.needStorage && this.supplyPointSupports(point, 'storage') && containerPosition.role !== 'pickup';
+          if (canStore) {
+            for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
+              try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
+            }
+          }
+
+          const canPickup = containerPosition.role !== 'storage';
+          if (canPickup && requirements.needPickaxe && this.supplyPointSupports(point, 'pickaxe') && !this.hasUsablePickaxe() && bot.inventory.emptySlotCount() > 0) {
+            const pickaxe = this.containerItems(container).find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+            if (pickaxe) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
+          }
+          if (canPickup && requirements.needFood && this.supplyPointSupports(point, 'food') && !bot.inventory.items().some((item) => this.isFoodItem(item)) && bot.inventory.emptySlotCount() > 0) {
+            const food = this.containerItems(container).find((item) => this.isFoodItem(item));
+            if (food) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
+          }
+
+          const readyPickaxe = !requirements.needPickaxe || this.hasUsablePickaxe();
+          const readyFood = !requirements.needFood || bot.inventory.items().some((item) => this.isFoodItem(item));
+          const readyStorage = !requirements.needStorage || bot.inventory.emptySlotCount() > 2;
+          if (readyPickaxe && readyFood && readyStorage) return true;
+        } catch (error) {
+          this.log(`Supply container operation failed at ${containerPosition.x},${containerPosition.y},${containerPosition.z}: ${error.message}`, 'warn');
+        } finally {
+          if (container) {
+            try { await container.close(); } catch (_) {}
+          }
+        }
+      }
+      return false;
+    });
+    return { completed: Boolean(result), opened };
+  }
+
   async maybeResupply(requirements = {}) {
     const bot = this.bot;
     if (this.resupplyBusy) return { ok: false, reason: 'busy', message: 'another resupply operation is already running' };
@@ -1333,63 +1484,48 @@ class ManagedBot extends EventEmitter {
     const hasFood = bot.inventory.items().some((item) => this.isFoodItem(item));
     const needPickaxe = requirements.requirePickaxe ?? !hasPickaxe;
     const needFood = requirements.requireFood ?? !hasFood;
-    const inventoryFull = bot.inventory.emptySlotCount() <= 2;
-    if (!inventoryFull && (!needPickaxe || hasPickaxe) && (!needFood || hasFood)) return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
-    const points = this.matchingSupplyPoints().map((point) => ({
-      ...point,
-      distance: bot.entity.position.distanceTo(new Vec3(point.x, point.y, point.z))
-    })).sort((a, b) => b.priority - a.priority || a.distance - b.distance);
-    if (!points.length) return { ok: false, reason: 'no-point', message: 'no enabled supply point is configured for this dimension' };
+    const needStorage = requirements.requireStorage ?? bot.inventory.emptySlotCount() <= 2;
+    if ((!needPickaxe || hasPickaxe) && (!needFood || hasFood) && (!needStorage || bot.inventory.emptySlotCount() > 2)) {
+      return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
+    }
+
+    const points = this.matchingSupplyPoints().filter((point) => (
+      (needStorage && this.supplyPointSupports(point, 'storage')) ||
+      (needPickaxe && this.supplyPointSupports(point, 'pickaxe')) ||
+      (needFood && this.supplyPointSupports(point, 'food'))
+    )).map((point) => {
+      const storageFirst = needStorage && this.supplyPointSupports(point, 'storage') ? 1 : 0;
+      const distance = this.hasSupplyAnchor(point) ? bot.entity.position.distanceTo(new Vec3(point.x, point.y, point.z)) : Number.POSITIVE_INFINITY;
+      return { ...point, storageFirst, distance };
+    }).sort((a, b) => b.storageFirst - a.storageFirst || b.priority - a.priority || a.distance - b.distance);
+
+    if (!points.length) {
+      const roles = [needStorage && '矿物存储', needPickaxe && '镐子补给', needFood && '食物补给'].filter(Boolean).join('、');
+      return { ok: false, reason: 'no-point', message: `没有配置支持${roles}的 Home 补给点` };
+    }
 
     this.resupplyBusy = true;
     let opened = 0;
     try {
       for (const point of points) {
-        for (const containerPosition of this.supplyContainers(point)) {
-          if (!bot.entity) break;
-          const block = bot.blockAt(new Vec3(containerPosition.x, containerPosition.y, containerPosition.z));
-          if (!block || !isRegionContainerName(block.name)) {
-            this.log(`Configured supply container is unavailable at ${containerPosition.x},${containerPosition.y},${containerPosition.z}.`, 'warn');
-            continue;
+        try {
+          const operation = await this.operateSupplyPoint(point, { needPickaxe, needFood, needStorage });
+          opened += operation.opened;
+          if (operation.completed) {
+            this.log(`Resupply completed at ${point.name}${point.home ? ` (/home ${point.home})` : ''}.`);
+            return { ok: true, reason: 'completed', message: `resupply completed at ${point.name}` };
           }
-          let container = null;
-          try {
-            await this.moveToBlock(block, 'supply');
-            container = await bot.openContainer(block);
-            opened += 1;
-            if (containerPosition.role !== 'pickup') {
-              for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
-                try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
-              }
-            }
-            if (containerPosition.role !== 'storage') {
-              const contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
-              const pickaxe = contents.find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
-              const food = contents.find((item) => this.isFoodItem(item));
-              if (needPickaxe && !this.hasUsablePickaxe() && pickaxe && bot.inventory.emptySlotCount() > 0) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
-              if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item)) && food && bot.inventory.emptySlotCount() > 0) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
-            }
-            contents = typeof container.containerItems === 'function' ? container.containerItems() : container.slots.filter(Boolean);
-            const readyPickaxe = !needPickaxe || this.hasUsablePickaxe();
-            const readyFood = !needFood || bot.inventory.items().some((item) => this.isFoodItem(item));
-            if (readyPickaxe && readyFood && bot.inventory.emptySlotCount() > 2) {
-              this.log(`Resupply completed at ${point.name}.`);
-              return { ok: true, reason: 'completed', message: `resupply completed at ${point.name}` };
-            }
-          } catch (error) {
-            this.log(`Supply container operation failed at ${containerPosition.x},${containerPosition.y},${containerPosition.z}: ${error.message}`, 'warn');
-          } finally {
-            if (container) {
-              try { await container.close(); } catch (_) {}
-            }
-          }
+        } catch (error) {
+          this.log(`Supply point ${point.name} failed: ${error.message}`, 'warn');
         }
       }
+
       const missing = [];
-      if (needPickaxe && !this.hasUsablePickaxe()) missing.push('usable pickaxe');
-      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item))) missing.push('food');
-      if (missing.length) return { ok: false, reason: 'stock-empty', message: `configured supply points have no ${missing.join(' or ')}` };
-      return { ok: false, reason: opened ? 'inventory-full' : 'invalid-point', message: opened ? 'supplies are present but inventory remains full' : 'no configured supply container could be opened' };
+      if (needPickaxe && !this.hasUsablePickaxe()) missing.push('可用镐子');
+      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item))) missing.push('食物');
+      if (needStorage && bot.inventory.emptySlotCount() <= 2) missing.push('空余背包空间');
+      if (missing.length) return { ok: false, reason: 'stock-empty', message: `所有已配置 Home 都未能提供：${missing.join('、')}` };
+      return { ok: false, reason: opened ? 'incomplete' : 'invalid-point', message: opened ? '补给容器已访问，但维护任务未完成' : '扫描范围内没有可用容器，或 Home 传送失败' };
     } finally {
       this.resupplyBusy = false;
     }
@@ -1534,7 +1670,7 @@ class ManagedBot extends EventEmitter {
   }
 
   helpText() {
-    return 'fish | mine <block> [count] | 网页配置区域和黑/白名单后使用 area on/off/status | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
+    return 'fish | mine <block> [count] | 网页配置区域和黑/白名单后使用 area on/off/status | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | delhome <name> | come <player> | follow <player> | cmd /<command>';
   }
 }
 

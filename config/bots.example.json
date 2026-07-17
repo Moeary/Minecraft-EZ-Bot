@@ -41,7 +41,40 @@
       "skinUsername": "ExampleBot",
       "auth": "microsoft",
       "version": "1.20.4",
-      "resupplyPoints": [],
+      "resupplyPoints": [
+        {
+          "id": "supply-home",
+          "name": "综合补给站",
+          "home": "supply",
+          "roles": ["food", "pickaxe", "sleep"],
+          "dimension": "overworld",
+          "x": null,
+          "y": null,
+          "z": null,
+          "scanRadius": 8,
+          "autoDiscover": true,
+          "bed": null,
+          "containers": [],
+          "enabled": true,
+          "priority": 20
+        },
+        {
+          "id": "storage-home",
+          "name": "矿物仓库",
+          "home": "storage",
+          "roles": ["storage"],
+          "dimension": "overworld",
+          "x": null,
+          "y": null,
+          "z": null,
+          "scanRadius": 16,
+          "autoDiscover": true,
+          "bed": null,
+          "containers": [],
+          "enabled": true,
+          "priority": 10
+        }
+      ],
       "viewer": {
         "enabled": true,
         "port": 3101,
