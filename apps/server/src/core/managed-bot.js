@@ -19,8 +19,14 @@ class ManagedBot extends EventEmitter {
     this.reconnectTimer = null;
     this.attackTimer = null;
     this.fishingTimer = null;
+    this.miningTimer = null;
+    this.supplyTimer = null;
     this.killAuraEnabled = false;
     this.fishing = false;
+    this.mining = false;
+    this.supply = false;
+    this.miningTarget = null;
+    this.supplyRole = 'auto';
     this.chatLogEnabled = false;
     this.viewerStarted = false;
   }
@@ -72,6 +78,7 @@ class ManagedBot extends EventEmitter {
     delete options.reconnectDelayMs;
     delete options.authReconnectDelayMs;
     delete options.targetMobs;
+    delete options.skinUsername;
     if (options.auth === 'microsoft') {
       options.onMsaCode = (data) => {
         const verification = data.verification_uri || data.verificationUri || 'https://www.microsoft.com/link';
@@ -105,6 +112,7 @@ class ManagedBot extends EventEmitter {
         startAt: 14,
         bannedFood: ['rotten_flesh', 'spider_eye']
       };
+      bot.autoEat.disable();
       this.setState('online');
       this.startViewer();
       this.startAttackLoop();
@@ -199,7 +207,15 @@ class ManagedBot extends EventEmitter {
     this.attackTimer = null;
     if (this.fishingTimer) clearTimeout(this.fishingTimer);
     this.fishingTimer = null;
+    if (this.miningTimer) clearTimeout(this.miningTimer);
+    this.miningTimer = null;
+    if (this.supplyTimer) clearTimeout(this.supplyTimer);
+    this.supplyTimer = null;
     this.fishing = false;
+    this.mining = false;
+    this.supply = false;
+    this.miningTarget = null;
+    if (this.bot?.autoEat?.disable) this.bot.autoEat.disable();
   }
 
   handleChat(username, message) {
@@ -223,7 +239,7 @@ class ManagedBot extends EventEmitter {
       return { command: tokens[1], args: tokens.slice(2) };
     }
 
-    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish']);
+    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip']);
     if (knownCommands.has(tokens[0].toLowerCase()) && this.isTarget(tokens[tokens.length - 1])) {
       return { command: tokens[0], args: tokens.slice(1, -1) };
     }
@@ -288,10 +304,13 @@ class ManagedBot extends EventEmitter {
     if (normalized === 'stop') {
       bot.pathfinder.setGoal(null);
       bot.pvp.stop();
-      this.fishing = false;
-      return this.respond(`[${bot.username}] Stopped.`);
+      this.clearRuntimeLoops();
+      return this.respond(`[${bot.username}] Stopped all active skills.`);
     }
     if (normalized === 'fish') return this.startFishing();
+    if (normalized === 'mine' || normalized === 'gather') return this.startMining(args);
+    if (normalized === 'supply' || normalized === 'restock') return this.setSupply(args[0]);
+    if (normalized === 'equip') return this.equipRole(args[0] || 'auto');
     return { ok: false, message: `Unknown command: ${normalized}` };
   }
 
@@ -344,6 +363,131 @@ class ManagedBot extends EventEmitter {
     }
   }
 
+
+  resolveMiningTarget(name) {
+    const aliases = {
+      ores: ['coal_ore', 'iron_ore', 'copper_ore', 'gold_ore', 'redstone_ore', 'lapis_ore', 'diamond_ore', 'emerald_ore'],
+      stone: ['stone', 'deepslate'],
+      logs: ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'],
+      wood: ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'],
+      coal: ['coal_ore', 'deepslate_coal_ore'],
+      iron: ['iron_ore', 'deepslate_iron_ore'],
+      copper: ['copper_ore', 'deepslate_copper_ore'],
+      diamond: ['diamond_ore', 'deepslate_diamond_ore']
+    };
+    const names = aliases[String(name || 'ores').toLowerCase()] || [String(name || 'ores').toLowerCase()];
+    const data = minecraftData(this.bot.version);
+    const ids = names.map((blockName) => data.blocksByName[blockName]?.id).filter(Boolean);
+    return { names, ids };
+  }
+
+  startMining(args = []) {
+    if (this.mining) return this.respond(`[${this.bot.username}] Mining is already running.`);
+    const target = this.resolveMiningTarget(args[0] || 'ores');
+    if (!target.ids.length) return this.respond(`[${this.bot.username}] Unknown block target: ${args[0] || 'ores'}.`);
+    const requested = Number.parseInt(args[1] || '0', 10);
+    this.miningTarget = { names: target.names, ids: target.ids, remaining: Number.isFinite(requested) && requested > 0 ? Math.min(requested, 128) : null, mined: 0 };
+    this.mining = true;
+    this.log(`Mining started: ${target.names.join(', ')}${this.miningTarget.remaining ? ` ×${this.miningTarget.remaining}` : ' until stopped'}.`);
+    this.respond(`[${this.bot.username}] Mining ${target.names[0]}${this.miningTarget.remaining ? ` ×${this.miningTarget.remaining}` : ''}.`);
+    this.miningLoop();
+    return { ok: true, message: 'Mining started.' };
+  }
+
+  async miningLoop() {
+    if (!this.mining || !this.bot?.entity || !this.miningTarget) return;
+    const bot = this.bot;
+    try {
+      if (this.miningTarget.remaining !== null && this.miningTarget.mined >= this.miningTarget.remaining) {
+        this.mining = false;
+        this.log(`Mining finished: ${this.miningTarget.mined} block(s).`);
+        this.respond(`[${bot.username}] Mining finished: ${this.miningTarget.mined} block(s).`);
+        return;
+      }
+      const positions = bot.findBlocks({ matching: this.miningTarget.ids, maxDistance: 32, count: 1 });
+      if (!positions.length) {
+        this.mining = false;
+        this.log('Mining paused: no matching blocks within 32 blocks.', 'warn');
+        this.respond(`[${bot.username}] No matching blocks nearby; mining paused.`);
+        return;
+      }
+      const block = bot.blockAt(positions[0]);
+      if (!block || !bot.canDigBlock(block)) throw new Error('Target block is not diggable.');
+      const movements = new Movements(bot, minecraftData(bot.version));
+      movements.canDig = false;
+      bot.pathfinder.setMovements(movements);
+      await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
+      const tool = bot.pathfinder.bestHarvestTool(block);
+      if (tool) await bot.equip(tool, 'hand');
+      await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+      await bot.dig(block, true, 'raycast');
+      if (!this.mining || !this.miningTarget) return;
+      this.miningTarget.mined += 1;
+      this.miningTimer = setTimeout(() => this.miningLoop(), 250);
+    } catch (error) {
+      this.log(`Mining cycle failed: ${error.message}`, 'warn');
+      if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 1800);
+    }
+  }
+
+  equipRole(role = 'auto', announce = true) {
+    const bot = this.bot;
+    if (!bot) return { ok: false, message: `${this.displayName} is not online.` };
+    const normalized = String(role || 'auto').toLowerCase();
+    const effective = normalized === 'auto' ? (this.mining ? 'pickaxe' : this.killAuraEnabled ? 'weapon' : 'tool') : normalized;
+    const patterns = {
+      pickaxe: ['pickaxe'], axe: ['axe'], shovel: ['shovel'], weapon: ['sword', 'axe'], food: ['bread', 'carrot', 'potato', 'beef', 'porkchop', 'chicken', 'mutton', 'cod', 'salmon'], tool: ['pickaxe', 'axe', 'shovel', 'hoe']
+    };
+    const item = bot.inventory.items().find((candidate) => (patterns[effective] || patterns.tool).some((part) => candidate.name.includes(part)));
+    if (!item) {
+      const message = `[${bot.username}] No ${effective} item found in inventory.`;
+      if (announce) return this.respond(message);
+      this.log(message, 'warn');
+      return { ok: false, message };
+    }
+    this.supplyRole = effective;
+    if (bot.heldItem?.name === item.name) {
+      return { ok: true, message: `${item.name} is already equipped.` };
+    }
+    bot.equip(item, 'hand')
+      .then(() => {
+        this.log(`Equipped ${item.name} for ${effective}.`);
+        if (announce) this.respond(`[${bot.username}] Equipped ${item.name}.`);
+      })
+      .catch((error) => this.log(`Equipment switch failed: ${error.message}`, 'warn'));
+    return { ok: true, message: `Equipping ${item.name}.` };
+  }
+
+  setSupply(mode = 'on') {
+    const normalized = String(mode || 'on').toLowerCase();
+    if (['off', 'stop', 'disable'].includes(normalized)) {
+      this.supply = false;
+      if (this.supplyTimer) clearTimeout(this.supplyTimer);
+      this.supplyTimer = null;
+      if (this.bot?.autoEat?.disable) this.bot.autoEat.disable();
+      return this.respond(`[${this.bot.username}] Supply management disabled.`);
+    }
+    const wasEnabled = this.supply;
+    this.supply = true;
+    if (this.bot?.autoEat?.enable) this.bot.autoEat.enable();
+    this.log('Supply and equipment management enabled.');
+    if (!wasEnabled) this.supplyLoop();
+    return this.respond(`[${this.bot.username}] Supply management enabled.`);
+  }
+
+  async supplyLoop() {
+    if (!this.supply || !this.bot) return;
+    try {
+      const bot = this.bot;
+      if (bot.autoEat?.eat && typeof bot.food === 'number' && bot.food <= 14 && !bot.autoEat.isEating) await bot.autoEat.eat();
+      this.equipRole(this.supplyRole === 'auto' ? 'auto' : this.supplyRole, false);
+    } catch (error) {
+      this.log(`Supply check failed: ${error.message}`, 'warn');
+    } finally {
+      if (this.supply) this.supplyTimer = setTimeout(() => this.supplyLoop(), 12000);
+    }
+  }
+
   stationaryAttack() {
     const bot = this.bot;
     if (!bot?.entity) return;
@@ -372,6 +516,9 @@ class ManagedBot extends EventEmitter {
       dimension: bot?.game?.dimension || bot?.game?.level?.name || null,
       killAura: this.killAuraEnabled,
       fishing: this.fishing,
+      mining: this.mining,
+      supply: this.supply,
+      skinIdentifier: this.bot?.username || this.definition.skinUsername || this.definition.username || this.definition.id,
       inventory: inventory.slice(0, 8).map((item) => ({ name: item.name, count: item.count })),
       nearbyPlayers,
       lastError: this.lastError,
@@ -381,7 +528,7 @@ class ManagedBot extends EventEmitter {
   }
 
   helpText() {
-    return 'fish | kill on/off | stop | status | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
+    return 'fish | mine <block> [count] | supply on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>';
   }
 }
 

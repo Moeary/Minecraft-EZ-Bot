@@ -5,7 +5,9 @@ const skills = [
   require('./combat'),
   require('./fishing'),
   require('./pathfinder'),
-  require('./chat-command')
+  require('./chat-command'),
+  require('./mining'),
+  require('./supply')
 ];
 
 function listSkills() {

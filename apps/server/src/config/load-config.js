@@ -24,6 +24,7 @@ function normalizeBotDefinition(bot, defaults = {}, index = 0) {
     ...bot,
     id: String(bot.id).trim(),
     displayName: String(bot.displayName || bot.id).trim(),
+    skinUsername: String(bot.skinUsername || '').trim() || null,
     enabled: bot.enabled !== false,
     port: Number(bot.port || 25565),
     viewer: {

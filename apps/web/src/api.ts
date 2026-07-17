@@ -10,6 +10,7 @@ export interface ViewerConfig {
 export interface BotDefinition {
   id: string;
   displayName: string;
+  skinUsername?: string;
   enabled: boolean;
   host: string;
   port: number;
@@ -38,6 +39,9 @@ export interface BotStatus {
   dimension: string | null;
   killAura: boolean;
   fishing: boolean;
+  mining: boolean;
+  supply: boolean;
+  skinIdentifier: string | null;
   inventory: Array<{ name: string; count: number }>;
   nearbyPlayers: string[];
   lastError: string | null;

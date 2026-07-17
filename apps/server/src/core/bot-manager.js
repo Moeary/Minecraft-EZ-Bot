@@ -48,6 +48,7 @@ class BotManager extends EventEmitter {
     return this.config.bots.map((bot) => ({
       id: bot.id,
       displayName: bot.displayName,
+      skinUsername: bot.skinUsername || '',
       enabled: bot.enabled,
       host: bot.host,
       port: bot.port,

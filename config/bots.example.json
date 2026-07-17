@@ -28,6 +28,7 @@
       "host": "minecraft.example.com",
       "port": 25565,
       "username": "your-microsoft-account@example.com",
+      "skinUsername": "ExampleBot",
       "auth": "microsoft",
       "version": "1.20.4",
       "viewer": {
