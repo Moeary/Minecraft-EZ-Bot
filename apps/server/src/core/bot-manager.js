@@ -2,7 +2,7 @@ const EventEmitter = require('node:events');
 const { ManagedBot } = require('./managed-bot');
 const { SkinCache } = require('./skin-cache');
 const { loadConfig, normalizeBotDefinition, normalizeSkillSettings, validateBotDefinitions } = require('../config/load-config');
-const { saveBotsConfig, saveWhitelist } = require('../config/config-store');
+const { saveBotsConfig, saveWhitelist, saveWorkflows } = require('../config/config-store');
 
 class BotManager extends EventEmitter {
   constructor(config = loadConfig()) {
@@ -61,6 +61,7 @@ class BotManager extends EventEmitter {
       viewer: { ...bot.viewer },
       commandWhitelist: bot.commandWhitelist ? [...bot.commandWhitelist] : null,
       resupplyPoints: bot.resupplyPoints ? bot.resupplyPoints.map((point) => ({ ...point, containers: point.containers?.map((container) => ({ ...container })) || [], bed: point.bed ? { ...point.bed } : null })) : [],
+      homeTargets: bot.homeTargets ? bot.homeTargets.map((target) => ({ ...target })) : [],
       skills: bot.skills ? normalizeSkillSettings(this.config.defaults.skills, bot.skills) : null
     }));
   }
@@ -284,6 +285,55 @@ class BotManager extends EventEmitter {
     }
   }
 
+  workflows() {
+    return (this.config.workflows || []).map((workflow) => ({
+      ...workflow,
+      nodes: workflow.nodes.map((node) => ({ ...node, params: { ...node.params } })),
+      edges: workflow.edges.map((edge) => ({ ...edge }))
+    }));
+  }
+
+  updateWorkflows(workflows) {
+    const { normalizeWorkflows } = require('../config/workflow-config');
+    const normalized = normalizeWorkflows(workflows);
+    if (!normalized.length && Array.isArray(workflows) && workflows.length) return { ok: false, message: 'No valid workflows were provided.' };
+    try {
+      saveWorkflows(this.config, normalized);
+      this.config.workflows = normalized;
+      for (const runtime of this.bots.values()) runtime.workflowEngine.definitions = normalized;
+      return { ok: true, message: `Saved ${normalized.length} workflow(s).`, workflows: this.workflows() };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  async runWorkflow(id, workflowId, input = {}) {
+    const runtime = this.get(id);
+    if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
+    try {
+      const result = await runtime.runWorkflow(workflowId, input);
+      return { ok: true, message: `Workflow ${workflowId} completed.`, result };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+  configureHomeTargets(id, targets) {
+    const runtime = this.get(id);
+    if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
+    try {
+      const normalized = runtime.configureHomeTargets(targets);
+      return { ok: true, message: `${runtime.displayName} Home targets saved.`, targets: normalized };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  setHomeTarget(id, targetId) {
+    const runtime = this.get(id);
+    if (!runtime) return Promise.resolve({ ok: false, message: `Unknown bot: ${id}` });
+    return runtime.setHomeTarget(targetId);
+  }
+
   configureSupply(id, points) {
     const runtime = this.get(id);
     if (!runtime) return { ok: false, message: `Unknown bot: ${id}` };
@@ -374,4 +424,3 @@ class BotManager extends EventEmitter {
 }
 
 module.exports = { BotManager };
-

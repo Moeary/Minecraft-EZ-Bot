@@ -6,9 +6,10 @@ const pvp = require('mineflayer-pvp').plugin;
 const mineflayerViewer = require('prismarine-viewer').mineflayer;
 const minecraftData = require('minecraft-data');
 const { Vec3 } = require('vec3');
-const { authCachePath, normalizeSkillSettings, normalizeSupplyPoint } = require('../config/load-config');
+const { authCachePath, normalizeSkillSettings, normalizeSupplyPoint, normalizeHomeTarget } = require('../config/load-config');
 const { TaskScheduler } = require('./task-scheduler');
 const { saveBotsConfig } = require('../config/config-store');
+const { WorkflowEngine } = require('./workflow-engine');
 
 const MAX_REGION_VOLUME = 32768;
 const REGION_FLUIDS = new Set(['water', 'lava', 'flowing_water', 'flowing_lava']);
@@ -49,6 +50,11 @@ function cleanBlockName(name) {
 
 function cleanDimension(name) {
   return String(name || '').replace(/^minecraft:/, '').trim() || null;
+}
+
+function isSafeDimension(name) {
+  const value = cleanDimension(name);
+  return Boolean(value && /^[a-z0-9_.-]+:[a-z0-9_./-]+$/i.test(`minecraft:${value}`));
 }
 
 function cleanHomeName(name) {
@@ -111,13 +117,17 @@ class ManagedBot extends EventEmitter {
     this.maintenanceBusy = false;
     this.digging = false;
     this.taskScheduler = new TaskScheduler(this.effectiveSkillConfig());
+    this.workflowEngine = new WorkflowEngine(config.workflows || []);
     this.resupplyPoints = Array.isArray(botConfig.resupplyPoints) ? botConfig.resupplyPoints.map(normalizeSupplyPoint).filter(Boolean) : [];
+    this.homeTargets = Array.isArray(botConfig.homeTargets) ? botConfig.homeTargets.map(normalizeHomeTarget).filter(Boolean) : [];
     this.skillConfig = this.effectiveSkillConfig();
     this.supplyRole = 'auto';
     this.chatLogEnabled = false;
     this.viewerStarted = false;
     this.alertLastSent = new Map();
     this.activeAlerts = new Set();
+    this.miningFailedBlocks = new Map();
+    this.regionBlockedBlocks = new Map();
   }
 
   log(message, level = 'info') {
@@ -185,15 +195,18 @@ class ManagedBot extends EventEmitter {
       bot.loadPlugin(pathfinder);
       bot.loadPlugin(autoEat);
       bot.loadPlugin(pvp);
-        this.bot = bot;
+      this.bot = bot;
       if (bot._client?.on) {
         bot._client.on('error', (error) => {
           if (this.bot !== bot) return;
           const message = String(error?.message || error || 'Minecraft protocol stream error');
+          const text = message.toLowerCase();
+          if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint') || text.includes('missing characters in string')) {
+            this.handleProtocolError(bot, message);
+            return;
+          }
           this.lastError = message;
           this.log(`Minecraft protocol stream error: ${message}`, 'error');
-          const text = message.toLowerCase();
-          if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint')) this.scheduleReconnect('protocol_error');
         });
       }
     } catch (error) {
@@ -244,13 +257,33 @@ class ManagedBot extends EventEmitter {
 
     bot.on('error', (error) => {
       if (this.bot !== bot) return;
-      this.lastError = error.message;
-      this.log(error.message, 'error');
-      const text = error.message.toLowerCase();
-      if (text.includes('auth') || text.includes('obtain profile data')) this.scheduleReconnect('auth_error');
-      else if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint')) this.scheduleReconnect('protocol_error');
-      else if (error.code === 'ECONNRESET') this.scheduleReconnect('network_error');
+      const text = String(error.message || error).toLowerCase();
+      if (text.includes('auth') || text.includes('obtain profile data')) {
+        this.lastError = error.message;
+        this.log(error.message, 'error');
+        this.scheduleReconnect('auth_error');
+      } else if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint') || text.includes('missing characters in string')) {
+        this.handleProtocolError(bot, error.message);
+      } else {
+        this.lastError = error.message;
+        this.log(error.message, 'error');
+        if (error.code === 'ECONNRESET') this.scheduleReconnect('network_error');
+      }
     });
+  }
+
+  handleProtocolError(bot, error) {
+    if (this.bot !== bot || !this.desiredRunning) return;
+    const message = String(error?.message || error || 'Minecraft protocol decode error');
+    this.lastError = message;
+    this.log(`Minecraft protocol state is invalid; reconnecting instead of continuing with stale inventory: ${message}`, 'error');
+    this.closeViewer();
+    this.clearRuntimeLoops();
+    this.bot = null;
+    try { bot.end('Protocol decode error'); } catch (_) {
+      try { bot._client?.end(); } catch (_) {}
+    }
+    this.scheduleReconnect('protocol_error');
   }
 
   scheduleReconnect(type) {
@@ -306,6 +339,8 @@ class ManagedBot extends EventEmitter {
     this.viewerStarted = false;
     this.alertLastSent = new Map();
     this.activeAlerts = new Set();
+    this.miningFailedBlocks = new Map();
+    this.regionBlockedBlocks = new Map();
   }
 
   effectiveSkillConfig() {
@@ -380,6 +415,73 @@ class ManagedBot extends EventEmitter {
     return this.resupplyPoints;
   }
 
+  serializedHomeTargets() {
+    return this.homeTargets.map((target) => ({ ...target }));
+  }
+
+  configureHomeTargets(targets = []) {
+    const normalized = Array.isArray(targets) ? targets.map(normalizeHomeTarget).filter(Boolean) : [];
+    const ids = new Set();
+    for (const target of normalized) {
+      if (ids.has(target.id)) target.id = `${target.id}-${ids.size + 1}`;
+      ids.add(target.id);
+    }
+    this.homeTargets = normalized;
+    const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, homeTargets: this.serializedHomeTargets() } : bot);
+    saveBotsConfig(this.config, next);
+    this.config.bots = next;
+    this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    this.emit('state', this.publicStatus());
+    return this.homeTargets;
+  }
+
+  async setHomeTarget(targetId) {
+    if (!this.bot?.entity || this.state !== 'online') return { ok: false, message: `${this.displayName} is not online.` };
+    const key = String(targetId || '').trim();
+    const target = this.homeTargets.find((item) => item.enabled !== false && (item.id === key || item.name === key));
+    if (!target) return { ok: false, message: `Unknown or disabled Home target: ${key}` };
+    const targetDimension = cleanDimension(target.dimension) || this.currentDimension();
+    if (target.dimension && !isSafeDimension(target.dimension)) return { ok: false, message: `Invalid target dimension: ${target.dimension}` };
+    const targetPosition = new Vec3(target.x, target.y, target.z);
+    this.homeActivity = { home: target.name, type: 'home', state: 'traveling', message: `正在前往 ${target.name}（${targetDimension}）设定 Home` };
+    this.emit('state', this.publicStatus());
+    try {
+      if (this.currentDimension() !== targetDimension) {
+        if (target.arrivalHome) {
+          const moved = await this.issueServerCommand(`/home ${target.arrivalHome}`, true);
+          if (!moved && this.currentDimension() !== targetDimension) throw new Error(`Home ${target.arrivalHome} did not teleport the bot`);
+        } else if (target.useServerTeleport !== false) {
+          const dimensionId = `minecraft:${targetDimension}`;
+          const command = `/execute in ${dimensionId} run tp ${this.bot.username} ${target.x} ${target.y} ${target.z}`;
+          const moved = await this.issueServerCommand(command, true);
+          if (!moved) throw new Error('cross-dimension teleport did not move the bot; grant teleport permission or configure arrivalHome');
+        } else {
+          throw new Error(`target is in ${targetDimension}; configure arrivalHome or enable server teleport`);
+        }
+      }
+      if (this.currentDimension() !== targetDimension) throw new Error(`arrived in ${this.currentDimension() || 'unknown'}, expected ${targetDimension}`);
+      if (this.bot.entity.position.distanceTo(targetPosition) > 8) {
+        await this.moveNearPosition(targetPosition, 2, 'pathfinder');
+      }
+      if (this.bot.entity.position.distanceTo(targetPosition) > 8) throw new Error('could not reach the configured Home coordinates');
+      await this.issueServerCommand(`/sethome ${target.name}`);
+      target.lastSetAt = new Date().toISOString();
+      const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, homeTargets: this.serializedHomeTargets() } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+      this.homeActivity = { home: target.name, type: 'home', state: 'ready', message: `已在 ${targetDimension} ${target.x}, ${target.y}, ${target.z} 设定 Home` };
+      this.emit('state', this.publicStatus());
+      this.log(`Home ${target.name} set at ${target.x},${target.y},${target.z} in ${targetDimension}.`);
+      return { ok: true, message: `Home ${target.name} set successfully.`, target: { ...target } };
+    } catch (error) {
+      this.homeActivity = { home: target.name, type: 'home', state: 'error', message: `设定 Home 失败：${error.message}` };
+      this.emit('state', this.publicStatus());
+      this.log(`Set Home target ${target.name} failed: ${error.message}`, 'warn');
+      return { ok: false, message: error.message };
+    }
+  }
+
   startAttackLoop() {
     if (this.attackTimer) return;
     this.attackTimer = setInterval(() => {
@@ -437,7 +539,7 @@ class ManagedBot extends EventEmitter {
       return { command: tokens[1], args: tokens.slice(2) };
     }
 
-    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'delhome', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip', 'area', 'region', 'minearea', 'sleep', 'resupply', 'unseal', 'look']);
+    const knownCommands = new Set(['help', 'come', 'tpa', 'sethome', 'home', 'delhome', 'cmd', 'kill', 'attack', 'status', 'info', 'follow', 'stop', 'fish', 'mine', 'gather', 'supply', 'restock', 'equip', 'area', 'region', 'minearea', 'sleep', 'resupply', 'unseal', 'look', 'workflow', 'flow']);
     if (knownCommands.has(tokens[0].toLowerCase()) && this.isTarget(tokens[tokens.length - 1])) {
       return { command: tokens[0], args: tokens.slice(1, -1) };
     }
@@ -515,7 +617,21 @@ class ManagedBot extends EventEmitter {
     if (normalized === 'resupply') return this.executeResupplyCommand(args);
     if (normalized === 'unseal') return this.unsealFluids();
     if (normalized === 'look') return this.lookCommand(args);
+    if (normalized === 'workflow' || normalized === 'flow') {
+      const workflowId = String(args[0] || '').trim();
+      if (!workflowId) return { ok: false, message: 'Usage: workflow run <workflowId>' };
+      const id = workflowId.toLowerCase() === 'run' ? String(args[1] || '').trim() : workflowId;
+      if (!id) return { ok: false, message: 'Usage: workflow run <workflowId>' };
+      this.runWorkflow(id)
+        .then((result) => this.log(`Workflow ${id} completed: ${result.trace.join(' -> ')}`))
+        .catch((error) => this.log(`Workflow ${id} failed: ${error.message}`, 'warn'));
+      return { ok: true, message: `Workflow ${id} started.` };
+    }
     return { ok: false, message: `Unknown command: ${normalized}` };
+  }
+
+  async runWorkflow(workflowId, input = {}) {
+    return this.workflowEngine.run(this, workflowId, input);
   }
 
   sendChat(message) {
@@ -538,7 +654,7 @@ class ManagedBot extends EventEmitter {
   startFishing(announce = true) {
     if (this.fishing) return announce ? this.respond("I'm already fishing!") : { ok: true, message: 'Fishing already running.' };
     const bot = this.bot;
-    const rod = bot.inventory.items().find((item) => item.name.includes('fishing_rod'));
+    const rod = this.inventoryItems().find((item) => this.itemName(item).includes('fishing_rod'));
     if (!rod) {
       const result = `[${bot.username}] No fishing rod in inventory.`;
       if (announce) return this.respond(result);
@@ -591,6 +707,42 @@ class ManagedBot extends EventEmitter {
     return { names, ids };
   }
 
+  miningPositionKey(position) {
+    return position ? `${position.x},${position.y},${position.z}` : null;
+  }
+
+  rememberMiningFailure(position, reason) {
+    const key = this.miningPositionKey(position);
+    if (!key) return;
+    const previous = this.miningFailedBlocks.get(key);
+    this.miningFailedBlocks.set(key, { at: Date.now(), reason: String(reason || 'not currently diggable') });
+    if (!previous || Date.now() - previous.at > 15000) {
+      this.log(`Mining skipped ${key}: ${reason}. Trying another matching block.`, 'warn');
+    }
+  }
+
+  isMiningBlockSkipped(position) {
+    const key = this.miningPositionKey(position);
+    if (!key) return false;
+    const failure = this.miningFailedBlocks.get(key);
+    if (!failure) return false;
+    if (Date.now() - failure.at > 20000) {
+      this.miningFailedBlocks.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  findMiningCandidate() {
+    const bot = this.bot;
+    const positions = bot.findBlocks({ matching: this.miningTarget.ids, maxDistance: 32, count: 32 });
+    const candidates = positions
+      .map((position) => bot.blockAt(position))
+      .filter((block) => block && !this.isMiningBlockSkipped(block.position))
+      .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
+    return { candidates, foundMatching: positions.length > 0 };
+  }
+
   startMining(args = []) {
     if (this.regionMining) return this.respond(`[${this.bot.username}] Region mining is active; stop it before starting targeted mining.`);
     if (this.mining) return this.respond(`[${this.bot.username}] Mining is already running.`);
@@ -598,6 +750,7 @@ class ManagedBot extends EventEmitter {
     if (!target.ids.length) return this.respond(`[${this.bot.username}] Unknown block target: ${args[0] || 'ores'}.`);
     const requested = Number.parseInt(args[1] || '0', 10);
     this.miningTarget = { names: target.names, ids: target.ids, remaining: Number.isFinite(requested) && requested > 0 ? Math.min(requested, 128) : null, mined: 0 };
+    this.miningFailedBlocks.clear();
     this.mining = true;
     this.log(`Mining started: ${target.names.join(', ')}${this.miningTarget.remaining ? ` ×${this.miningTarget.remaining}` : ' until stopped'}.`);
     this.respond(`[${this.bot.username}] Mining ${target.names[0]}${this.miningTarget.remaining ? ` ×${this.miningTarget.remaining}` : ''}.`);
@@ -608,6 +761,7 @@ class ManagedBot extends EventEmitter {
   async miningLoop() {
     if (!this.mining || !this.bot?.entity || !this.miningTarget) return;
     const bot = this.bot;
+    let attemptedBlock = null;
     try {
       if (this.miningTarget.remaining !== null && this.miningTarget.mined >= this.miningTarget.remaining) {
         this.mining = false;
@@ -615,18 +769,25 @@ class ManagedBot extends EventEmitter {
         this.respond(`[${bot.username}] Mining finished: ${this.miningTarget.mined} block(s).`);
         return;
       }
-      const positions = bot.findBlocks({ matching: this.miningTarget.ids, maxDistance: 32, count: 1 });
-      if (!positions.length) {
+      const selection = this.findMiningCandidate();
+      if (!selection.foundMatching) {
         this.mining = false;
         this.log('Mining paused: no matching blocks within 32 blocks.', 'warn');
         this.respond(`[${bot.username}] No matching blocks nearby; mining paused.`);
         return;
       }
-      const block = bot.blockAt(positions[0]);
-      if (!block) throw new Error('Target block is not loaded.');
-      await this.moveToBlock(block, 'mining');
-      const current = bot.blockAt(block.position);
-      if (!current || !bot.canDigBlock(current)) throw new Error('Target block is not diggable from the current position.');
+      if (!selection.candidates.length) {
+        if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 300);
+        return;
+      }
+      attemptedBlock = selection.candidates[0];
+      await this.moveToBlock(attemptedBlock, 'mining');
+      const current = bot.blockAt(attemptedBlock.position);
+      if (!current || !bot.canDigBlock(current)) {
+        this.rememberMiningFailure(attemptedBlock.position, 'target is not diggable from the current position');
+        if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 250);
+        return;
+      }
       const toolReady = await this.prepareHarvestTool(current, 'Targeted mining');
       if (!toolReady) {
         this.mining = false;
@@ -636,13 +797,19 @@ class ManagedBot extends EventEmitter {
       await bot.lookAt(current.position.offset(0.5, 0.5, 0.5));
       await bot.dig(current, true, 'raycast');
       this.digging = false;
+      this.miningFailedBlocks.delete(this.miningPositionKey(current.position));
       if (!this.mining || !this.miningTarget) return;
       this.miningTarget.mined += 1;
       this.miningTimer = setTimeout(() => this.miningLoop(), 250);
     } catch (error) {
       this.digging = false;
-      this.log(`Mining cycle failed: ${error.message}`, 'warn');
-      if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 1800);
+      if (attemptedBlock) {
+        this.rememberMiningFailure(attemptedBlock.position, error.message);
+        if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 250);
+      } else {
+        this.log(`Mining cycle failed: ${error.message}`, 'warn');
+        if (this.mining) this.miningTimer = setTimeout(() => this.miningLoop(), 1800);
+      }
     }
   }
 
@@ -682,6 +849,9 @@ class ManagedBot extends EventEmitter {
     const mode = input.mode === 'whitelist' ? 'whitelist' : 'blacklist';
     const allow = Array.isArray(input.allow) ? [...new Set(input.allow.map(cleanBlockName).filter(Boolean))] : [];
     const customDeny = Array.isArray(input.deny) ? input.deny.map(cleanBlockName).filter(Boolean) : [];
+    const layerTop = Number.isInteger(Number(input.layerTop)) ? Math.max(normalizedBounds.minY, Math.min(normalizedBounds.maxY, Number(input.layerTop))) : normalizedBounds.maxY;
+    const layerArea = (normalizedBounds.maxX - normalizedBounds.minX + 1) * (normalizedBounds.maxZ - normalizedBounds.minZ + 1);
+    const layerCursor = Number.isInteger(Number(input.layerCursor)) ? Math.max(0, Math.min(layerArea * 2, Number(input.layerCursor))) : 0;
     return {
       bounds: normalizedBounds,
       dimension: cleanDimension(input.dimension),
@@ -695,6 +865,8 @@ class ManagedBot extends EventEmitter {
       cursor: 0,
       scanned: 0,
       mined: 0,
+      layerTop,
+      layerCursor,
       active: false,
       pausedReason: null,
       phase: 'idle',
@@ -713,7 +885,9 @@ class ManagedBot extends EventEmitter {
       anchor: this.regionPlan.anchor ? { ...this.regionPlan.anchor } : null,
       mode: this.regionPlan.mode,
       allow: [...this.regionPlan.allow],
-      deny: [...(this.regionPlan.customDeny || [])]
+      deny: [...(this.regionPlan.customDeny || [])],
+      layerTop: this.regionPlan.layerTop,
+      layerCursor: this.regionPlan.layerCursor
     };
   }
 
@@ -731,6 +905,7 @@ class ManagedBot extends EventEmitter {
     const deny = Array.isArray(input.deny) ? [...new Set(input.deny.map(cleanBlockName).filter(Boolean))] : [];
     if (mode === 'whitelist' && !allow.length) return { ok: false, message: 'Whitelist mode needs at least one allowed block.' };
     const currentDimension = this.bot?.entity ? this.currentDimension() : null;
+    this.regionBlockedBlocks.clear();
     this.regionPlan = {
       bounds: parsed.bounds,
       dimension: cleanDimension(input.dimension) || currentDimension || this.regionPlan?.dimension || null,
@@ -744,6 +919,8 @@ class ManagedBot extends EventEmitter {
       cursor: 0,
       scanned: 0,
       mined: 0,
+      layerTop: parsed.bounds.maxY,
+      layerCursor: 0,
       active: false,
       pausedReason: null,
       phase: 'idle',
@@ -774,6 +951,7 @@ class ManagedBot extends EventEmitter {
     if (action === 'set') {
       const parsed = this.regionBoundsFromArgs(args.slice(1));
       if (!parsed || parsed.error) return this.respond(parsed?.error || 'Usage: area set <x1> <y1> <z1> <x2> <y2> <z2>');
+      this.regionBlockedBlocks.clear();
       this.regionPlan = {
         bounds: parsed.bounds,
         volume: parsed.volume,
@@ -784,6 +962,8 @@ class ManagedBot extends EventEmitter {
         cursor: 0,
         scanned: 0,
         mined: 0,
+        layerTop: parsed.bounds.maxY,
+        layerCursor: 0,
         active: false,
         pausedReason: null,
         lastBlock: null,
@@ -828,9 +1008,11 @@ class ManagedBot extends EventEmitter {
   regionStatusMessage() {
     if (!this.regionPlan) return `[${this.bot.username}] No mining region configured.`;
     const { bounds, mode, volume, cursor, scanned, mined, active, pausedReason, phase, home, dimension } = this.regionPlan;
+    const layer = this.regionLayerBounds();
     const progress = volume ? `${Math.min(100, Math.round((cursor / volume) * 100))}%` : '0%';
     const anchor = this.regionPlan.anchor ? `; Home=${home} @ ${this.regionPlan.anchor.x},${this.regionPlan.anchor.y},${this.regionPlan.anchor.z}` : `; Home=${home} (not initialized)`;
-    return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} [${phase || 'idle'}] ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}; dimension=${dimension || 'unknown'}${anchor}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
+    const layerText = layer ? `; layer=${layer.top}-${layer.bottom} (2-high, top-down)` : '';
+    return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} [${phase || 'idle'}] ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}; dimension=${dimension || 'unknown'}${layerText}${anchor}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
   }
 
   miningHomeName() {
@@ -983,13 +1165,59 @@ class ManagedBot extends EventEmitter {
     return this.respond(`[${this.bot.username}] Region mining stopped.`);
   }
 
-  regionPositionAt(index) {
+  regionLayerBounds() {
+    const bounds = this.regionPlan?.bounds;
+    if (!bounds) return null;
+    const top = Number.isInteger(this.regionPlan.layerTop)
+      ? Math.max(bounds.minY, Math.min(bounds.maxY, this.regionPlan.layerTop))
+      : bounds.maxY;
+    return { top, bottom: Math.max(bounds.minY, top - 1) };
+  }
+
+  regionLayerVolume() {
+    const layer = this.regionLayerBounds();
+    if (!layer) return 0;
     const bounds = this.regionPlan.bounds;
     const width = bounds.maxX - bounds.minX + 1;
     const depth = bounds.maxZ - bounds.minZ + 1;
-    const x = bounds.minX + (index % width);
-    const z = bounds.minZ + (Math.floor(index / width) % depth);
-    const y = bounds.minY + Math.floor(index / (width * depth));
+    return width * depth * (layer.top - layer.bottom + 1);
+  }
+
+  regionProgressCursor() {
+    const layer = this.regionLayerBounds();
+    if (!layer) return 0;
+    const bounds = this.regionPlan.bounds;
+    const area = (bounds.maxX - bounds.minX + 1) * (bounds.maxZ - bounds.minZ + 1);
+    const completedLayers = bounds.maxY - layer.top;
+    return Math.min(this.regionPlan.volume, completedLayers * area + Math.min(area, this.regionPlan.layerCursor || 0));
+  }
+
+  advanceRegionLayer() {
+    const layer = this.regionLayerBounds();
+    if (!layer || layer.top <= this.regionPlan.bounds.minY) return false;
+    this.regionPlan.layerTop = layer.top - 1;
+    this.regionPlan.layerCursor = 0;
+    this.regionPlan.cursor = this.regionProgressCursor();
+    this.regionPlan.pending = null;
+    this.regionPlan.retryCount = 0;
+    this.regionPlan.phase = 'descending';
+    this.log(`Region layer complete at Y ${layer.top}-${layer.bottom}; descending to Y ${this.regionPlan.layerTop}-${Math.max(this.regionPlan.bounds.minY, this.regionPlan.layerTop - 1)}.`);
+    return true;
+  }
+
+  regionPositionAt(index) {
+    const bounds = this.regionPlan.bounds;
+    const layer = this.regionLayerBounds();
+    const width = bounds.maxX - bounds.minX + 1;
+    const depth = bounds.maxZ - bounds.minZ + 1;
+    const area = width * depth;
+    const layerHeight = layer.top - layer.bottom + 1;
+    if (index < 0 || index >= area * layerHeight) return null;
+    const layerOffset = Math.floor(index / area);
+    const xzIndex = index % area;
+    const x = bounds.minX + (xzIndex % width);
+    const z = bounds.minZ + Math.floor(xzIndex / width);
+    const y = layer.top - layerOffset;
     return new Vec3(x, y, z);
   }
 
@@ -998,8 +1226,39 @@ class ManagedBot extends EventEmitter {
     return Boolean(bounds && position.x >= bounds.minX && position.x <= bounds.maxX && position.y >= bounds.minY && position.y <= bounds.maxY && position.z >= bounds.minZ && position.z <= bounds.maxZ);
   }
 
+  isInActiveRegionLayer(position) {
+    const layer = this.regionLayerBounds();
+    return Boolean(layer && position && position.y >= layer.bottom && position.y <= layer.top);
+  }
+
+  regionBlockKey(position) {
+    return this.miningPositionKey(position);
+  }
+
+  rememberRegionBlockFailure(position, reason) {
+    const key = this.regionBlockKey(position);
+    if (!key) return;
+    const previous = this.regionBlockedBlocks.get(key);
+    this.regionBlockedBlocks.set(key, { at: Date.now(), reason: String(reason || 'not currently diggable') });
+    if (!previous || Date.now() - previous.at > 15000) {
+      this.log(`Region mining skipped ${key}: ${reason}. Searching the next block.`, 'warn');
+    }
+  }
+
+  isRegionBlockBlocked(position) {
+    const key = this.regionBlockKey(position);
+    if (!key) return false;
+    const failure = this.regionBlockedBlocks.get(key);
+    if (!failure) return false;
+    if (Date.now() - failure.at > 20000) {
+      this.regionBlockedBlocks.delete(key);
+      return false;
+    }
+    return true;
+  }
+
   isRegionTarget(block) {
-    if (!block || !this.isInsideRegion(block.position)) return false;
+    if (!block || !this.isInsideRegion(block.position) || !this.isInActiveRegionLayer(block.position)) return false;
     const name = cleanBlockName(block.name);
     if (!name || REGION_FLUIDS.has(name) || isRegionProtectedName(name)) return false;
     if (this.regionPlan.mode === 'whitelist') return this.regionPlan.allow.includes(name);
@@ -1007,7 +1266,7 @@ class ManagedBot extends EventEmitter {
   }
 
   isRegionCandidate(block) {
-    if (!this.isRegionTarget(block)) return false;
+    if (!this.isRegionTarget(block) || this.isRegionBlockBlocked(block.position)) return false;
     const directions = [
       new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0),
       new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)
@@ -1045,19 +1304,23 @@ class ManagedBot extends EventEmitter {
       this.regionPlan.pending = null;
       this.regionPlan.retryCount = 0;
     }
-    while (this.regionPlan.cursor < this.regionPlan.volume) {
-      const position = this.regionPositionAt(this.regionPlan.cursor);
-      const block = this.bot.blockAt(position);
-      if (!block) return { unloaded: position };
-      this.regionPlan.cursor += 1;
-      this.regionPlan.scanned += 1;
-      if (this.isRegionCandidate(block)) {
-        this.regionPlan.pending = { x: position.x, y: position.y, z: position.z };
-        this.regionPlan.retryCount = 0;
-        return { block };
+    while (true) {
+      const layerVolume = this.regionLayerVolume();
+      while (this.regionPlan.layerCursor < layerVolume) {
+        const position = this.regionPositionAt(this.regionPlan.layerCursor);
+        const block = this.bot.blockAt(position);
+        if (!block) return { unloaded: position };
+        this.regionPlan.layerCursor += 1;
+        this.regionPlan.cursor = this.regionProgressCursor();
+        this.regionPlan.scanned += 1;
+        if (this.isRegionCandidate(block)) {
+          this.regionPlan.pending = { x: position.x, y: position.y, z: position.z };
+          this.regionPlan.retryCount = 0;
+          return { block };
+        }
       }
+      if (!this.advanceRegionLayer()) return { complete: true };
     }
-    return { complete: true };
   }
 
   async moveNearPosition(position, radius = 2, taskName = 'pathfinder') {
@@ -1132,7 +1395,7 @@ class ManagedBot extends EventEmitter {
   }
 
   getPlugItem() {
-    return this.bot.inventory.items().find((item) => PLUG_BLOCK_NAMES.includes(cleanBlockName(item.name)));
+    return this.inventoryItems().find((item) => PLUG_BLOCK_NAMES.includes(this.itemName(item)));
   }
 
   async sealFluidsAround(block) {
@@ -1174,8 +1437,9 @@ class ManagedBot extends EventEmitter {
 
   async regionMiningLoop() {
     if (!this.regionMining || !this.bot?.entity || !this.regionPlan) return;
+    let block = null;
     try {
-      let block = this.findRegionCandidate();
+      block = this.findRegionCandidate();
       if (!block) {
         const scan = this.scanRegionCursor();
         if (scan.complete) {
@@ -1218,13 +1482,11 @@ class ManagedBot extends EventEmitter {
         this.regionTimer = setTimeout(() => this.regionMiningLoop(), 100);
         return;
       }
-      if (!this.bot.canDigBlock(current)) {
-        this.regionPlan.retryCount += 1;
-        if (this.regionPlan.retryCount >= 5) {
-          this.pauseRegionMining(`cannot get line of sight to ${current.name} at ${current.position}`);
-          return;
-        }
-        this.regionTimer = setTimeout(() => this.regionMiningLoop(), 1000);
+      if (!current || !this.bot.canDigBlock(current)) {
+        this.rememberRegionBlockFailure(block.position, `target ${current?.name || 'block'} is not diggable from the current position`);
+        this.regionPlan.pending = null;
+        this.regionPlan.retryCount = 0;
+        if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 200);
         return;
       }
       if (!(await this.sealFluidsAround(current))) {
@@ -1242,11 +1504,20 @@ class ManagedBot extends EventEmitter {
       this.digging = false;
       this.regionPlan.pending = null;
       this.regionPlan.retryCount = 0;
+      this.regionBlockedBlocks.delete(this.regionBlockKey(current.position));
       this.regionPlan.mined += 1;
       this.regionPlan.lastBlock = { name: current.name, position: { x: current.position.x, y: current.position.y, z: current.position.z } };
       if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 180);
     } catch (error) {
       this.digging = false;
+      if (block) {
+        this.rememberRegionBlockFailure(block.position, error.message);
+        this.regionPlan.pending = null;
+        this.regionPlan.retryCount = 0;
+        this.regionPlan.pausedReason = `skipped ${block.name} at ${block.position}: ${error.message}`;
+        if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 250);
+        return;
+      }
       this.regionPlan.retryCount = (this.regionPlan.retryCount || 0) + 1;
       this.regionPlan.pausedReason = error.message;
       this.log(`Region mining cycle failed: ${error.message}`, 'warn');
@@ -1599,17 +1870,99 @@ class ManagedBot extends EventEmitter {
     this.resourceAlert('no-supply-bed', true, '已到达睡觉补给点，但扫描范围内没有找到可用床。', 120000);
   }
 
+  itemRegistryData(item) {
+    const type = Number(item?.type ?? item?.id);
+    if (!Number.isInteger(type)) return null;
+    try {
+      const data = minecraftData(this.bot?.version || this.definition.version);
+      return data?.items?.[type] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  itemName(item) {
+    if (!item) return '';
+    const directName = cleanBlockName(item.name);
+    if (directName && directName !== 'unknown') return directName;
+    const registryName = cleanBlockName(this.itemRegistryData(item)?.name);
+    if (registryName) return registryName;
+    return cleanBlockName(item.displayName);
+  }
+
+  isPickaxeItem(item) {
+    if (!item) return false;
+    const name = this.itemName(item);
+    if (name.includes('pickaxe')) return true;
+    const registry = this.itemRegistryData(item);
+    return Boolean(registry?.name && String(registry.name).toLowerCase().includes('pickaxe'));
+  }
+
+  itemDamage(item) {
+    const componentMapDamage = item?.componentMap?.get?.('minecraft:damage');
+    const componentListDamage = Array.isArray(item?.components)
+      ? item.components.find((component) => component?.type === 'minecraft:damage' || component?.name === 'minecraft:damage')
+      : null;
+    const nbtDamage = item?.nbt?.value?.Damage ?? item?.nbt?.value?.damage;
+    const raw = componentMapDamage?.data ?? componentMapDamage?.value ?? componentMapDamage?.damage
+      ?? componentListDamage?.data ?? componentListDamage?.value ?? componentListDamage?.damage
+      ?? nbtDamage?.value ?? nbtDamage;
+    const damage = Number(raw);
+    return Number.isFinite(damage) ? damage : null;
+  }
+
+  inventoryItems() {
+    if (!this.bot?.inventory) return [];
+    const inventory = this.bot.inventory;
+    const items = [
+      ...(typeof inventory.items === 'function' ? inventory.items() : []),
+      ...(Array.isArray(inventory.slots) ? inventory.slots : []),
+      this.bot.heldItem
+    ].filter(Boolean);
+    const seen = new Set();
+    return items.filter((item, index) => {
+      const slot = Number.isInteger(item.slot) ? item.slot : `unknown-${index}`;
+      const key = `${slot}:${item.type ?? this.itemName(item)}:${item.metadata ?? ''}:${item.count ?? 1}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
   isToolLow(item) {
-    const isTool = ['pickaxe', 'axe', 'shovel', 'sword', 'hoe'].some((name) => item?.name?.includes(name));
-    return Boolean(isTool && Number.isFinite(item.maxDurability) && Number.isFinite(item.durabilityUsed) && item.maxDurability - item.durabilityUsed <= 20);
+    const name = this.itemName(item);
+    const isTool = ['pickaxe', 'axe', 'shovel', 'sword', 'hoe'].some((part) => name.includes(part));
+    if (!isTool) return false;
+    const maxDurability = Number(item?.maxDurability ?? this.itemRegistryData(item)?.maxDurability);
+    const durabilityUsed = Number(item?.durabilityUsed ?? this.itemDamage(item));
+    if (!Number.isFinite(maxDurability) || maxDurability <= 0 || !Number.isFinite(durabilityUsed)) return false;
+    return maxDurability - durabilityUsed <= 20;
+  }
+
+  carriedItems() {
+    return this.inventoryItems();
+  }
+
+  pickaxeDiagnostics() {
+    return this.carriedItems()
+      .filter((item) => this.isPickaxeItem(item))
+      .map((item) => ({
+        name: this.itemName(item) || `type:${item.type ?? 'unknown'}`,
+        slot: item.slot ?? 'held',
+        count: item.count ?? 1,
+        maxDurability: Number.isFinite(Number(item.maxDurability ?? this.itemRegistryData(item)?.maxDurability)) ? Number(item.maxDurability ?? this.itemRegistryData(item)?.maxDurability) : null,
+        durabilityUsed: Number.isFinite(Number(item.durabilityUsed ?? this.itemDamage(item))) ? Number(item.durabilityUsed ?? this.itemDamage(item)) : null,
+        usable: !this.isToolLow(item)
+      }));
   }
 
   isFoodItem(item) {
-    return ['bread', 'carrot', 'potato', 'beetroot', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'apple', 'melon_slice', 'baked_potato', 'cooked_'].some((part) => item?.name?.includes(part));
+    const name = this.itemName(item);
+    return ['bread', 'carrot', 'potato', 'beetroot', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'apple', 'melon_slice', 'baked_potato', 'cooked_'].some((part) => name.includes(part));
   }
 
   hasUsablePickaxe() {
-    return Boolean(this.bot?.inventory?.items().some((item) => item.name.includes('pickaxe') && !this.isToolLow(item)));
+    return this.carriedItems().some((item) => this.isPickaxeItem(item) && !this.isToolLow(item));
   }
 
   blockNeedsTool(block) {
@@ -1618,10 +1971,10 @@ class ManagedBot extends EventEmitter {
 
   usableHarvestTool(block) {
     if (!this.bot || !block) return null;
-    const preferred = this.bot.pathfinder.bestHarvestTool(block);
+    const preferred = this.bot.pathfinder?.bestHarvestTool?.(block);
     if (preferred && !this.isToolLow(preferred)) return preferred;
     if (!block.harvestTools) return null;
-    return this.bot.inventory.items().find((item) => block.harvestTools[item.type] && !this.isToolLow(item)) || null;
+    return this.carriedItems().find((item) => block.harvestTools[item.type] && !this.isToolLow(item)) || null;
   }
 
   async prepareHarvestTool(block, taskName) {
@@ -1631,7 +1984,12 @@ class ManagedBot extends EventEmitter {
       tool = this.usableHarvestTool(block);
     }
     if (!tool && this.blockNeedsTool(block)) {
-      const message = `${taskName} 已暂停：${block.name} 需要可用工具，但背包和已配置补给点中都没有找到。`;
+      const pickaxes = this.pickaxeDiagnostics();
+      const observed = this.carriedItems().map((item) => this.itemName(item) || `type:${item.type ?? 'unknown'}`).filter(Boolean);
+      const detail = pickaxes.length
+        ? `检测到镐子：${pickaxes.map((item) => `${item.name}（${item.usable ? '可用' : '耐久不足'}）`).join('、')}`
+        : `未检测到任何 pickaxe（包含手持栏位）；当前物品：${observed.length ? observed.join('、') : '背包数据为空'}`;
+      const message = `${taskName} 已暂停：${block.name} 需要可用工具，但${detail}。`;
       this.resourceAlert('missing-required-tool', true, message, 30000);
       return null;
     }
@@ -1641,10 +1999,10 @@ class ManagedBot extends EventEmitter {
   }
 
   isKeepItem(item) {
-    if (item.name.includes('pickaxe') && this.isToolLow(item)) return false;
-    return this.isFoodItem(item) || ['pickaxe', 'axe', 'shovel', 'sword', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots', ...PLUG_BLOCK_NAMES].some((part) => item.name.includes(part));
+    const name = this.itemName(item);
+    if (name.includes('pickaxe') && this.isToolLow(item)) return false;
+    return this.isFoodItem(item) || ['pickaxe', 'axe', 'shovel', 'sword', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots', ...PLUG_BLOCK_NAMES].some((part) => name.includes(part));
   }
-
   clearResourceAlertPrefix(prefix) {
     for (const key of this.activeAlerts) {
       if (key.startsWith(prefix)) this.activeAlerts.delete(key);
@@ -1681,7 +2039,7 @@ class ManagedBot extends EventEmitter {
   async checkResourceAlerts() {
     const bot = this.bot;
     if (!bot?.inventory) return;
-    const items = bot.inventory.items();
+    const items = this.inventoryItems();
     const hasFood = items.some((item) => this.isFoodItem(item));
     const lowHealth = typeof bot.health === 'number' && bot.health <= 8;
     const hungryWithoutFood = typeof bot.food === 'number' && bot.food <= 14 && !hasFood;
@@ -1692,7 +2050,11 @@ class ManagedBot extends EventEmitter {
       bot.pvp?.stop();
     }
     this.resourceAlert('no-food', hungryWithoutFood, `饱食度较低（${Math.round(bot.food)}/20），背包里没有找到可食用物品。`);
-    this.resourceAlert('no-pickaxe', miningNeedsPickaxe, '挖矿需要可用镐，但背包里没有找到。');
+    const pickaxeDiagnostics = this.pickaxeDiagnostics();
+    const pickaxeMessage = miningNeedsPickaxe
+      ? `挖矿需要可用镐；审核条件：物品名、物品 ID 或手持栏位能识别为 pickaxe，且剩余耐久必须大于 20。当前检测：${pickaxeDiagnostics.length ? pickaxeDiagnostics.map((item) => `${item.name}（${item.usable ? '可用' : '耐久不足'}）`).join('、') : `未找到（背包数据：${items.length ? items.map((item) => this.itemName(item) || `type:${item.type ?? 'unknown'}`).join('、') : '为空'}）`}。`
+      : '';
+    this.resourceAlert('no-pickaxe', miningNeedsPickaxe, pickaxeMessage);
     if (!hungryWithoutFood && !miningNeedsPickaxe) this.clearResourceAlertPrefix('resupply-');
     if ((hungryWithoutFood || miningNeedsPickaxe) && this.resupplyEnabled && !this.resupplyBusy) {
       const result = await this.maybeResupply({ requireFood: hungryWithoutFood, requirePickaxe: miningNeedsPickaxe });
@@ -1722,23 +2084,23 @@ class ManagedBot extends EventEmitter {
           opened += 1;
           const canStore = requirements.needStorage && this.supplyPointSupports(point, 'storage') && containerPosition.role !== 'pickup';
           if (canStore) {
-            for (const item of bot.inventory.items().filter((candidate) => !this.isKeepItem(candidate))) {
+            for (const item of this.inventoryItems().filter((candidate) => !this.isKeepItem(candidate))) {
               try { await container.deposit(item.type, item.metadata, item.count, item.nbt); } catch (_) {}
             }
           }
 
           const canPickup = containerPosition.role !== 'storage';
           if (canPickup && requirements.needPickaxe && this.supplyPointSupports(point, 'pickaxe') && !this.hasUsablePickaxe() && bot.inventory.emptySlotCount() > 0) {
-            const pickaxe = this.containerItems(container).find((item) => item.name.includes('pickaxe') && !this.isToolLow(item));
+            const pickaxe = this.containerItems(container).find((item) => this.itemName(item).includes('pickaxe') && !this.isToolLow(item));
             if (pickaxe) await container.withdraw(pickaxe.type, pickaxe.metadata, 1);
           }
-          if (canPickup && requirements.needFood && this.supplyPointSupports(point, 'food') && !bot.inventory.items().some((item) => this.isFoodItem(item)) && bot.inventory.emptySlotCount() > 0) {
+          if (canPickup && requirements.needFood && this.supplyPointSupports(point, 'food') && !this.inventoryItems().some((item) => this.isFoodItem(item)) && bot.inventory.emptySlotCount() > 0) {
             const food = this.containerItems(container).find((item) => this.isFoodItem(item));
             if (food) await container.withdraw(food.type, food.metadata, Math.min(food.count, 32));
           }
 
           const readyPickaxe = !requirements.needPickaxe || this.hasUsablePickaxe();
-          const readyFood = !requirements.needFood || bot.inventory.items().some((item) => this.isFoodItem(item));
+          const readyFood = !requirements.needFood || this.inventoryItems().some((item) => this.isFoodItem(item));
           const readyStorage = !requirements.needStorage || bot.inventory.emptySlotCount() > 2;
           if (readyPickaxe && readyFood && readyStorage) return true;
         } catch (error) {
@@ -1759,7 +2121,7 @@ class ManagedBot extends EventEmitter {
     if (this.resupplyBusy) return { ok: false, reason: 'busy', message: 'another resupply operation is already running' };
     if (!bot?.entity) return { ok: false, reason: 'offline', message: 'bot world data is unavailable' };
     const hasPickaxe = this.hasUsablePickaxe();
-    const hasFood = bot.inventory.items().some((item) => this.isFoodItem(item));
+    const hasFood = this.inventoryItems().some((item) => this.isFoodItem(item));
     const needPickaxe = requirements.requirePickaxe ?? !hasPickaxe;
     const needFood = requirements.requireFood ?? !hasFood;
     const needStorage = requirements.requireStorage ?? bot.inventory.emptySlotCount() <= 2;
@@ -1802,7 +2164,7 @@ class ManagedBot extends EventEmitter {
 
       const missing = [];
       if (needPickaxe && !this.hasUsablePickaxe()) missing.push('可用镐子');
-      if (needFood && !bot.inventory.items().some((item) => this.isFoodItem(item))) missing.push('食物');
+      if (needFood && !this.inventoryItems().some((item) => this.isFoodItem(item))) missing.push('食物');
       if (needStorage && bot.inventory.emptySlotCount() <= 2) missing.push('空余背包空间');
       if (missing.length) return { ok: false, reason: 'stock-empty', message: `所有已配置 Home 都未能提供：${missing.join('、')}` };
       return { ok: false, reason: opened ? 'incomplete' : 'invalid-point', message: opened ? '补给容器已访问，但维护任务未完成' : '扫描范围内没有可用容器，或 Home 传送失败' };
@@ -1819,7 +2181,7 @@ class ManagedBot extends EventEmitter {
     const patterns = {
       pickaxe: ['pickaxe'], axe: ['axe'], shovel: ['shovel'], weapon: ['sword', 'axe'], food: ['bread', 'carrot', 'potato', 'beef', 'porkchop', 'chicken', 'mutton', 'cod', 'salmon'], tool: ['pickaxe', 'axe', 'shovel', 'hoe']
     };
-    const item = bot.inventory.items().find((candidate) => (patterns[effective] || patterns.tool).some((part) => candidate.name.includes(part)));
+    const item = this.inventoryItems().find((candidate) => (patterns[effective] || patterns.tool).some((part) => this.itemName(candidate).includes(part)));
     if (!item) {
       const message = `[${bot.username}] No ${effective} item found in inventory.`;
       if (announce) return this.respond(message);
@@ -1827,7 +2189,7 @@ class ManagedBot extends EventEmitter {
       return { ok: false, message };
     }
     this.supplyRole = effective;
-    if (bot.heldItem?.name === item.name) {
+    if (this.itemName(bot.heldItem) === this.itemName(item)) {
       return { ok: true, message: `${item.name} is already equipped.` };
     }
     bot.equip(item, 'hand')
@@ -1885,7 +2247,7 @@ class ManagedBot extends EventEmitter {
     if (!bot?.entity || this.digging || this.resupplyBusy || bot.isSleeping || this.taskScheduler.isBlocked('combat')) return;
     const entity = bot.nearestEntity((candidate) => this.definition.targetMobs.includes(candidate.name) && candidate.position.distanceTo(bot.entity.position) < 3.5);
     if (!entity) return;
-    const sword = bot.inventory.items().find((item) => item.name.includes('sword'));
+    const sword = this.inventoryItems().find((item) => this.itemName(item).includes('sword'));
     if (sword) bot.equip(sword, 'hand').catch(() => {});
     bot.lookAt(entity.position.offset(0, entity.height * 0.7, 0)).catch(() => {});
     bot.attack(entity);
@@ -1916,6 +2278,20 @@ class ManagedBot extends EventEmitter {
         phase: this.regionPlan.phase || 'idle'
       });
     }
+    for (const target of this.homeTargets) {
+      homes.push({
+        id: `home-target-${target.id}`,
+        name: target.name,
+        type: 'home',
+        label: '定点 Home',
+        dimension: target.dimension,
+        position: { x: target.x, y: target.y, z: target.z },
+        initialized: Boolean(target.lastSetAt),
+        active: target.enabled !== false,
+        lastSetAt: target.lastSetAt,
+        arrivalHome: target.arrivalHome
+      });
+    }
     for (const point of this.resupplyPoints) {
       if (!point.home) continue;
       homes.push({
@@ -1936,7 +2312,7 @@ class ManagedBot extends EventEmitter {
 
   publicStatus() {
     const bot = this.bot;
-    const inventory = bot?.inventory?.items?.() || [];
+    const inventory = this.carriedItems();
     const nearbyPlayers = bot?.entities && bot.entity?.position ? Object.values(bot.entities)
       .filter((entity) => entity.type === 'player' && entity.username !== bot.username && entity.position?.distanceTo(bot.entity.position) < 30)
       .map((entity) => entity.username).filter(Boolean) : [];
@@ -1963,14 +2339,24 @@ class ManagedBot extends EventEmitter {
         allow: this.regionPlan.allow,
         deny: this.regionPlan.deny,
         customDeny: this.regionPlan.customDeny || [],
+        dimension: this.regionPlan.dimension,
+        home: this.regionPlan.home,
+        anchor: this.regionPlan.anchor ? { ...this.regionPlan.anchor } : null,
+        phase: this.regionPlan.phase || 'idle',
         cursor: this.regionPlan.cursor,
         scanned: this.regionPlan.scanned,
         mined: this.regionPlan.mined,
+        layerTop: this.regionLayerBounds()?.top ?? null,
+        layerBottom: this.regionLayerBounds()?.bottom ?? null,
+        layerCursor: this.regionPlan.layerCursor,
         active: this.regionPlan.active,
         pausedReason: this.regionPlan.pausedReason,
         lastBlock: this.regionPlan.lastBlock
       } : null,
       resupplyPoints: this.resupplyPoints,
+      homeTargets: this.serializedHomeTargets(),
+      homes: this.knownHomes(),
+      homeActivity: this.homeActivity,
       skills: this.effectiveSkillConfig(),
       activeSkills: this.activeSkillKeys(),
       scheduler: this.taskScheduler.status(),
@@ -1990,7 +2376,7 @@ class ManagedBot extends EventEmitter {
   }
 
   helpText() {
-    return 'fish | mine <block> [count] | 网页配置区域和黑/白名单后使用 area on/off/status | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | delhome <name> | come <player> | follow <player> | cmd /<command>';
+    return 'workflow run <id> | fish | mine <block> [count] | 网页配置区域和黑/白名单后使用 area on/off/status | unseal | supply on/off | resupply on/off | resupply point add <x> <y> <z> | sleep on/off | equip <auto|pickaxe|axe|weapon> | kill on/off | stop | status | look <player> | look <yaw> <pitch> | home <name> | sethome <name> | delhome <name> | come <player> | follow <player> | cmd /<command>';
   }
 }
 

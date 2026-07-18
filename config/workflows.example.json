@@ -1,0 +1,32 @@
+{
+  "workflows": [
+    {
+      "id": "region-mining-safe",
+      "name": "自动挖区块（安全补给）",
+      "description": "建立挖矿 Home；有可用镐就直接开挖，否则前往补给点取镐；失败沿 error 分支结束。区域挖矿在后台持续运行。",
+      "enabled": true,
+      "trigger": { "type": "manual", "command": "workflow run region-mining-safe" },
+      "nodes": [
+        { "id": "start", "type": "start", "label": "开始", "x": 40, "y": 120 },
+        { "id": "home", "type": "ensure_mining_home", "label": "设置挖矿 Home", "x": 260, "y": 120 },
+        { "id": "pickaxe", "type": "has_usable_pickaxe", "label": "有可用镐？", "x": 500, "y": 120 },
+        { "id": "resupply", "type": "resupply", "label": "去补给点拿镐", "x": 740, "y": 240, "params": { "requirePickaxe": true } },
+        { "id": "equip", "type": "equip", "label": "装备镐子", "x": 980, "y": 120, "params": { "role": "pickaxe" } },
+        { "id": "mine", "type": "start_region_mining", "label": "开始区域挖矿", "x": 1220, "y": 120 },
+        { "id": "end", "type": "end", "label": "已启动", "x": 1460, "y": 120 },
+        { "id": "failed", "type": "end", "label": "补给失败 / 停止", "x": 980, "y": 360 }
+      ],
+      "edges": [
+        { "source": "start", "target": "home", "when": "next" },
+        { "source": "home", "target": "pickaxe", "when": "next" },
+        { "source": "pickaxe", "target": "equip", "when": "true" },
+        { "source": "pickaxe", "target": "resupply", "when": "false" },
+        { "source": "resupply", "target": "equip", "when": "next" },
+        { "source": "resupply", "target": "failed", "when": "error" },
+        { "source": "equip", "target": "mine", "when": "next" },
+        { "source": "mine", "target": "end", "when": "next" },
+        { "source": "home", "target": "failed", "when": "error" }
+      ]
+    }
+  ]
+}

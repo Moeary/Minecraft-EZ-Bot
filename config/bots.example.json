@@ -74,6 +74,7 @@
           "priority": 10
         }
       ],
+      "homeTargets": [],
       "viewer": {
         "enabled": true,
         "port": 3101,

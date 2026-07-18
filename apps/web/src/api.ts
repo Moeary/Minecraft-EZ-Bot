@@ -23,6 +23,16 @@ export interface SupplyPoint {
   priority: number;
 }
 
+export interface HomeTarget extends SupplyCoordinate {
+  id: string;
+  name: string;
+  dimension: string | null;
+  arrivalHome: string | null;
+  enabled: boolean;
+  useServerTeleport: boolean;
+  lastSetAt: string | null;
+}
+
 export interface ViewerConfig {
   enabled: boolean;
   port?: number;
@@ -33,7 +43,7 @@ export interface ViewerConfig {
 export interface KnownHome {
   id: string;
   name: string;
-  type: 'mining' | 'supply' | 'storage';
+  type: 'mining' | 'supply' | 'storage' | 'home';
   label: string;
   dimension: string | null;
   position: SupplyCoordinate | null;
@@ -42,6 +52,8 @@ export interface KnownHome {
   phase?: string;
   roles?: SupplyRole[];
   scanRadius?: number;
+  lastSetAt?: string | null;
+  arrivalHome?: string | null;
 }
 
 export interface BotDefinition {
@@ -57,6 +69,7 @@ export interface BotDefinition {
   viewer: ViewerConfig;
   commandWhitelist?: string[] | null;
   resupplyPoints?: SupplyPoint[];
+  homeTargets?: HomeTarget[];
   skills?: SkillSettings | null;
   miningRegion?: { bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }; dimension?: string | null; home?: string | null; anchor?: SupplyCoordinate | null; mode: 'blacklist' | 'whitelist'; allow: string[]; deny: string[] } | null;
 }
@@ -84,10 +97,11 @@ export interface BotStatus {
   supply: boolean;
   sleepEnabled?: boolean;
   resupplyEnabled?: boolean;
-  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; customDeny?: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; phase?: string; dimension?: string | null; home?: string | null; anchor?: SupplyCoordinate | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
+  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; customDeny?: string[]; cursor: number; scanned: number; mined: number; layerTop?: number | null; layerBottom?: number | null; layerCursor?: number; active: boolean; pausedReason: string | null; phase?: string; dimension?: string | null; home?: string | null; anchor?: SupplyCoordinate | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
   resupplyPoints?: SupplyPoint[];
+  homeTargets?: HomeTarget[];
   homes?: KnownHome[];
-  homeActivity?: { home: string; type: 'mining' | 'supply'; state: string; message: string } | null;
+  homeActivity?: { home: string; type: 'mining' | 'supply' | 'home'; state: string; message: string } | null;
   skills: SkillSettings;
   activeSkills: string[];
   scheduler?: { active: string | null; queued: string[]; priorities: Record<string, number> };
@@ -136,6 +150,24 @@ export async function fetchBots(): Promise<BotStatus[]> {
 
 export async function fetchConfig(): Promise<{ bots: BotDefinition[]; web: WebConfig; defaults?: { skills: SkillSettings }; skills?: SkillOverview }> {
   return request('/api/config');
+}
+
+
+export type WorkflowNodeType = 'start' | 'ensure_mining_home' | 'has_usable_pickaxe' | 'resupply' | 'goto_home' | 'start_region_mining' | 'stop_region_mining' | 'equip' | 'wait' | 'log' | 'end';
+export interface WorkflowNode { id: string; type: WorkflowNodeType; label: string; x: number; y: number; params: Record<string, unknown> }
+export interface WorkflowEdge { source: string; target: string; when: 'next' | 'true' | 'false' | 'error' }
+export interface WorkflowDefinition { id: string; name: string; description: string; enabled: boolean; trigger: Record<string, unknown>; nodes: WorkflowNode[]; edges: WorkflowEdge[] }
+
+export async function fetchWorkflows(): Promise<WorkflowDefinition[]> {
+  return (await request<{ workflows: WorkflowDefinition[] }>('/api/workflows')).workflows;
+}
+
+export function saveWorkflows(workflows: WorkflowDefinition[]) {
+  return request<Result & { workflows: WorkflowDefinition[] }>('/api/workflows', { method: 'PUT', body: JSON.stringify({ workflows }) });
+}
+
+export function runWorkflow(id: string, workflowId: string, input: Record<string, unknown> = {}) {
+  return request<Result>(`/api/bots/${encodeURIComponent(id)}/workflow`, { method: 'POST', body: JSON.stringify({ workflowId, input }) });
 }
 
 export interface SkillOverview {
@@ -212,4 +244,12 @@ export function configureRegion(id: string, region: { x1: number; y1: number; z1
 
 export function configureSupply(id: string, points: SupplyPoint[]) {
   return request<Result & { points: SupplyPoint[] }>(`/api/bots/${encodeURIComponent(id)}/supply`, { method: 'PUT', body: JSON.stringify({ points }) });
+}
+
+export function configureHomeTargets(id: string, targets: HomeTarget[]) {
+  return request<Result & { targets: HomeTarget[] }>(`/api/bots/${encodeURIComponent(id)}/home-targets`, { method: 'PUT', body: JSON.stringify({ targets }) });
+}
+
+export function setHomeTarget(id: string, targetId: string) {
+  return request<Result & { target: HomeTarget }>(`/api/bots/${encodeURIComponent(id)}/home-set`, { method: 'POST', body: JSON.stringify({ targetId }) });
 }

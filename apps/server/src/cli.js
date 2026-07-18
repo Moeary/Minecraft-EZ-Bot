@@ -4,7 +4,7 @@ const { BotManager } = require('./core/bot-manager');
 const { startWebServer } = require('./web/server');
 
 function printHelp(mode = 'single') {
-  console.log('Commands: fish | kill on/off | stop | status | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>');
+  console.log('Commands: fish | mine | area | resupply | workflow run <id> | kill on/off | stop | status | home <name> | sethome <name> | come <player> | follow <player> | cmd /<command>');
   if (mode === 'all') console.log('Multi-bot console syntax: <botId> <command> or all <command>');
 }
 

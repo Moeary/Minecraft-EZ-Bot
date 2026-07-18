@@ -4,6 +4,9 @@ const path = require('node:path');
 const ROOT_DIR = path.resolve(__dirname, '../../../..');
 const CONFIG_DIR = path.join(ROOT_DIR, 'config');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+const WORKFLOWS_PATH = process.env.MCBOT_WORKFLOWS_CONFIG || path.join(CONFIG_DIR, 'workflows.local.json');
+
+const { normalizeWorkflows } = require('./workflow-config');
 
 const SKILL_KEYS = ['combat', 'fishing', 'pathfinder', 'mining', 'supply', 'chat-command', 'openai-tools'];
 const DEFAULT_SKILL_PRIORITIES = {
@@ -68,6 +71,27 @@ function normalizeCoordinateObject(value) {
 
 const SUPPLY_ROLES = ['food', 'pickaxe', 'sleep', 'storage'];
 
+function normalizeHomeTarget(target, index = 0) {
+  if (!target || typeof target !== 'object') return null;
+  const position = normalizeCoordinateObject(target);
+  const name = String(target.name || target.home || '').trim().replace(/^\/?(?:sethome|home)\s+/i, '').replace(/\s+/g, '_');
+  if (!name || !position) return null;
+  const dimension = target.dimension ? String(target.dimension).replace(/^minecraft:/, '').trim() : null;
+  const arrivalHome = String(target.arrivalHome || target.viaHome || '').trim().replace(/^\/?home\s+/i, '').replace(/\s+/g, '_') || null;
+  return {
+    id: String(target.id || `home-target-${index + 1}`).trim() || `home-target-${index + 1}`,
+    name,
+    dimension,
+    x: position.x,
+    y: position.y,
+    z: position.z,
+    arrivalHome,
+    enabled: target.enabled !== false,
+    useServerTeleport: target.useServerTeleport !== false,
+    lastSetAt: target.lastSetAt ? String(target.lastSetAt) : null
+  };
+}
+
 function normalizeSupplyPoint(point, index = 0) {
   if (!point || typeof point !== 'object') return null;
   const rawContainers = Array.isArray(point.containers) ? point.containers : [];
@@ -131,6 +155,7 @@ function normalizeBotDefinition(bot, defaults = {}, index = 0) {
     },
     commandWhitelist: Array.isArray(bot.commandWhitelist) ? [...new Set(bot.commandWhitelist.map((name) => String(name).trim()).filter(Boolean))] : null,
     resupplyPoints: Array.isArray(bot.resupplyPoints) ? bot.resupplyPoints.map(normalizeSupplyPoint).filter(Boolean) : [],
+    homeTargets: Array.isArray(bot.homeTargets) ? bot.homeTargets.map(normalizeHomeTarget).filter(Boolean) : [],
     skills: bot.skills && typeof bot.skills === 'object' ? normalizeSkillSettings(defaults.skills, bot.skills) : null
   };
 
@@ -162,8 +187,11 @@ function validateBotDefinitions(bots) {
 function loadConfig() {
   const botsPath = process.env.MCBOT_BOTS_CONFIG || path.join(CONFIG_DIR, 'bots.local.json');
   const whitelistPath = process.env.MCBOT_WHITELIST_CONFIG || path.join(CONFIG_DIR, 'whitelist.local.json');
+  const workflowsPath = process.env.MCBOT_WORKFLOWS_CONFIG || WORKFLOWS_PATH;
   const raw = readJson(botsPath, readJson(path.join(CONFIG_DIR, 'bots.example.json'), { bots: [] }));
   const whitelist = readJson(whitelistPath, readJson(path.join(CONFIG_DIR, 'whitelist.example.json'), []));
+  const workflowsRaw = readJson(workflowsPath, readJson(path.join(CONFIG_DIR, 'workflows.example.json'), { workflows: [] }));
+  const workflows = normalizeWorkflows(workflowsRaw);
 
   if (!Array.isArray(raw.bots)) throw new Error('Config must contain a bots array.');
   if (!Array.isArray(whitelist)) throw new Error('Whitelist config must be a JSON array.');
@@ -203,7 +231,9 @@ function loadConfig() {
     defaults,
     web,
     bots,
-    whitelist: whitelist.map(String)
+    whitelist: whitelist.map(String),
+    workflowsPath,
+    workflows
   };
 }
 
@@ -219,8 +249,10 @@ module.exports = {
   normalizeBotDefinition,
   normalizeSkillSettings,
   normalizeSupplyPoint,
+  normalizeHomeTarget,
   validateBotDefinitions,
   readJson,
+  normalizeWorkflows,
   ROOT_DIR,
   SKILL_KEYS
 };

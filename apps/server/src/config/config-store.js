@@ -24,4 +24,8 @@ function saveWhitelist(config, whitelist) {
   writeJson(config.whitelistPath, whitelist);
 }
 
-module.exports = { saveBotsConfig, saveWhitelist };
+function saveWorkflows(config, workflows) {
+  writeJson(config.workflowsPath, { workflows });
+}
+
+module.exports = { saveBotsConfig, saveWhitelist, saveWorkflows };

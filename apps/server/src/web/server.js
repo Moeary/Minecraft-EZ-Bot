@@ -85,7 +85,8 @@ function createWebServer(manager) {
             allowRawCommands: manager.config.web.allowRawCommands
           },
           defaults: { skills: manager.config.defaults.skills },
-          skills: manager.skillSettings()
+          skills: manager.skillSettings(),
+          workflows: manager.workflows()
         });
       }
       if (pathname === '/api/skills' && request.method === 'GET') return json(response, 200, manager.skillSettings());
@@ -96,6 +97,12 @@ function createWebServer(manager) {
       if (pathname === '/api/skills/copy' && request.method === 'POST') {
         const body = await parseBody(request);
         return sendResult(response, manager.copySkills(body.sourceBotId, Array.isArray(body.targetBotIds) ? body.targetBotIds : []));
+      }
+
+      if (pathname === '/api/workflows' && request.method === 'GET') return json(response, 200, { workflows: manager.workflows() });
+      if (pathname === '/api/workflows' && request.method === 'PUT') {
+        const body = await parseBody(request);
+        return sendResult(response, manager.updateWorkflows(body.workflows));
       }
 
       if (pathname === '/api/whitelist' && request.method === 'GET') {
@@ -116,7 +123,7 @@ function createWebServer(manager) {
         return json(response, 200, manager.batch(body.action, Array.isArray(body.ids) ? body.ids : []));
       }
 
-      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective|region|supply))?$/);
+      const match = pathname.match(/^\/api\/bots\/([^/]+)(?:\/(start|stop|restart|command|perspective|region|supply|home-targets|home-set|workflow))?$/);
       if (match) {
         const id = decodeURIComponent(match[1]);
         const action = match[2];
@@ -139,6 +146,18 @@ function createWebServer(manager) {
         if (request.method === 'PUT' && action === 'supply') {
           const body = await parseBody(request);
           return sendResult(response, manager.configureSupply(id, body.points));
+        }
+        if (request.method === 'PUT' && action === 'home-targets') {
+          const body = await parseBody(request);
+          return sendResult(response, manager.configureHomeTargets(id, body.targets));
+        }
+        if (request.method === 'POST' && action === 'home-set') {
+          const body = await parseBody(request);
+          return sendResult(response, await manager.setHomeTarget(id, body.targetId || body.name));
+        }
+        if (request.method === 'POST' && action === 'workflow') {
+          const body = await parseBody(request);
+          return sendResult(response, await manager.runWorkflow(id, body.workflowId || body.id, body.input || {}));
         }
         if (request.method === 'POST' && action === 'command') {
           const body = await parseBody(request);
@@ -182,4 +201,3 @@ function startWebServer(manager) {
 }
 
 module.exports = { createWebServer, startWebServer };
-

@@ -42,6 +42,24 @@ Web 控制台支持：
 
 控制 API/UI 只需要一个端口（默认 `3000`）。Minecraft 机器人是向服务器发起连接的客户端，不需要为每个机器人开放入站端口；只有第三方视角需要独立端口，默认从 `web.viewerPortStart`（`3101`）开始分配。Microsoft 首次登录的设备代码会出现在服务端控制台及 Web 日志中。
 
+## 复合技能工作流
+
+工作流把机器人能力拆成可复用节点，并通过 JSON 保存：`start`、`ensure_mining_home`、`has_usable_pickaxe`、`resupply`、`goto_home`、`equip`、`start_region_mining`、`stop_region_mining`、`wait`、`log` 和 `end`。分支节点可以使用 `true`、`false`、`error` 三种出口，因此“有镐子直接挖、没有镐子去补给点、补给失败进入错误收尾”可以被配置成一张图，而不是写死在一个超长函数里。
+
+首次使用时复制示例配置：
+
+```powershell
+Copy-Item config/workflows.example.json config/workflows.local.json
+```
+
+然后可以在 Web 控制台的“复合工作流”页面拖拽节点、配置参数、连线、导入/导出 JSON，并保存到本地工作流配置。CLI 或 Web API 也可以启动工作流：
+
+```text
+workflow run region-mining-safe
+```
+
+工作流文件和机器人配置一样可能包含服务器行为参数，真实运行配置只放在被 Git 忽略的 `config/workflows.local.json`，不要提交账号、服务器地址或权限信息。
+
 ## 统一命令
 
 Web、CLI 和游戏聊天最终都调用同一套命令执行逻辑。现有命令包括 `status`、`stop`、`fish`、`kill on/off`、`home`、`sethome`、`come`、`follow` 和 `cmd`。

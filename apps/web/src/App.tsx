@@ -5,6 +5,8 @@ import {
   createBot,
   configureRegion,
   configureSupply,
+  configureHomeTargets,
+  setHomeTarget,
   copySkills,
   deleteBot,
   fetchBots,
@@ -22,12 +24,14 @@ import {
   type SkillKey,
   type SkillSettings,
   type SupplyPoint,
+  type HomeTarget,
   type SupplyRole,
   type LogEntry,
   type WebConfig
 } from './api';
+import { WorkflowPage } from './WorkflowPage';
 
-type View = 'overview' | 'bots' | 'skills' | 'detail';
+type View = 'overview' | 'bots' | 'skills' | 'workflows' | 'detail';
 type BotForm = {
   id: string;
   displayName: string;
@@ -276,6 +280,7 @@ function App() {
           <button className={view === 'overview' ? 'nav-item active' : 'nav-item'} onClick={() => setView('overview')}><Icon>⌂</Icon>总览<span className="nav-shortcut">01</span></button>
           <button className={view === 'bots' ? 'nav-item active' : 'nav-item'} onClick={() => setView('bots')}><Icon>♟</Icon>机器人管理<span className="nav-count">{bots.length}</span></button>
           <button className={view === 'skills' ? 'nav-item active' : 'nav-item'} onClick={() => setView('skills')}><Icon>✦</Icon>技能中心<span className="nav-shortcut">03</span></button>
+          <button className={view === 'workflows' ? 'nav-item active' : 'nav-item'} onClick={() => setView('workflows')}><Icon>⌘</Icon>复合工作流<span className="nav-shortcut">04</span></button>
           <button className={view === 'detail' ? 'nav-item active' : 'nav-item'} onClick={() => setView('detail')} disabled={!selected}><Icon>▣</Icon>详情预览<span className="nav-shortcut">04</span></button>
 
         </nav>
@@ -284,12 +289,13 @@ function App() {
       </aside>
 
       <section className="content-shell">
-        <header className="topbar"><div className="breadcrumbs"><span>MC BOT</span><b>/</b><strong>{view === 'overview' ? '总览' : view === 'bots' ? '机器人管理' : view === 'skills' ? '技能中心' : '详情预览'}</strong></div><div className="topbar-tools"><div className="connection-indicator"><span className="pulse" />{loading ? '连接中…' : '控制服务正常'}</div><button className="icon-button" title="刷新" onClick={refreshRuntime}>↻</button><button className="primary top-action" onClick={openAdd}>＋ 添加机器人</button></div></header>
+        <header className="topbar"><div className="breadcrumbs"><span>MC BOT</span><b>/</b><strong>{view === 'overview' ? '总览' : view === 'bots' ? '机器人管理' : view === 'skills' ? '技能中心' : view === 'workflows' ? '复合工作流' : '详情预览'}</strong></div><div className="topbar-tools"><div className="connection-indicator"><span className="pulse" />{loading ? '连接中…' : '控制服务正常'}</div><button className="icon-button" title="刷新" onClick={refreshRuntime}>↻</button><button className="primary top-action" onClick={openAdd}>＋ 添加机器人</button></div></header>
         {notice && <button className="notice" onClick={() => setNotice('')}><span>✓</span>{notice}<b>×</b></button>}
         <div className="page-content">
           {view === 'overview' && <Overview bots={bots} onlineCount={onlineCount} activeCount={activeCount} selected={selected} selectBot={selectBot} setView={setView} logs={logs} webConfig={webConfig} />}
           {view === 'bots' && <BotManagement bots={bots} selectedIds={selectedIds} toggleSelection={toggleSelection} selectAll={() => setSelectedIds(selectedIds.length === bots.length ? [] : bots.map((bot) => bot.id))} setSelectedIds={setSelectedIds} run={run} openAdd={openAdd} openEdit={openEdit} selected={selected} deleteBot={deleteBot} setSelectedId={setSelectedId} whitelist={whitelist} saveWhitelist={saveSelectedWhitelist} />}
           {view === 'skills' && <SkillsPage bots={bots} selected={selected} skillOverview={skillOverview} onOpenSkill={setSkillModalKey} run={run} />}
+          {view === 'workflows' && <WorkflowPage bots={bots} selected={selected} run={run} />}
           {view === 'detail' && selected && <DetailPage bots={bots} onSelectBot={setSelectedId} selected={selected} selectedDefinition={selectedDefinition} logs={logs.filter((log) => log.botId === selected.id)} command={command} setCommand={setCommand} submitCommand={submitCommand} run={run} previewMode={previewMode} setPreviewMode={setPreviewMode} viewerUrl={viewerUrl} openEdit={openEdit} />}
           {view === 'detail' && !selected && <EmptyState openAdd={openAdd} />}
         </div>
@@ -473,7 +479,7 @@ function MiningSkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
     <div className="block-catalog">{visibleBlocks.map((block) => <button type="button" key={block.id} disabled={block.protected} className={`block-option ${selectedSet.has(block.id) ? 'selected' : ''} ${block.protected ? 'protected' : ''}`} onClick={() => toggleBlock(block.id)}><span className="block-swatch" style={{ background: block.tone }} /><span><strong>{block.name}</strong><small>minecraft:{block.id}</small></span><i>{block.protected ? '锁定保护' : selectedSet.has(block.id) ? (mode === 'whitelist' ? '允许挖' : '禁止挖') : '未选择'}</i></button>)}</div>
     <div className="custom-block-row"><label>补充自定义方块<input value={customBlock} onChange={(event) => setCustomBlock(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addCustomBlocks(); } }} placeholder="输入中文名或 minecraft:block_id" /></label><button type="button" className="secondary" onClick={addCustomBlocks}>加入当前列表</button></div>
     {customSelected.length > 0 && <div className="selected-blocks"><span>自定义映射：</span>{customSelected.map((id) => <button type="button" key={id} onClick={() => toggleBlock(id)}>{id} ×</button>)}</div>}
-    <p className="muted">网页保存的中文选择会转换为真实方块 ID。区域挖矿会先建立稳定的初始 Home，补给、睡觉或卸货结束后返回该锚点继续；定向挖矿才使用临时检查点。{currentBot?.region?.pausedReason ? ` 当前暂停：${currentBot.region.pausedReason}` : ''}</p>
+    <p className="muted">网页保存的中文选择会转换为真实方块 ID。区域挖矿采用清理区模式：从最高 Y 层开始，每轮清理两层，完成后只下探一层继续；补给、睡觉或卸货结束后返回稳定的初始 Home。定向挖矿只会挖指定目标，不会为了接近矿石擅自挖石头。{currentBot?.region?.layerTop !== undefined ? ` 当前工作层：Y ${currentBot.region.layerTop} 至 ${currentBot.region.layerBottom}` : ''}{currentBot?.region?.pausedReason ? ` 当前暂停：${currentBot.region.pausedReason}` : ''}</p>
     {error && <p className="form-error">{error}</p>}
     <div className="drawer-actions mining-actions"><button type="button" className="secondary" disabled={!botId} onClick={() => save(false)}>仅保存设置</button><button type="button" className="primary" disabled={!botId} onClick={() => save(true)}>保存并开始挖矿</button><button type="button" className="secondary" disabled={!botId} onClick={() => run(() => sendCommand(botId, 'area off'), true)}>暂停挖矿</button></div>
   </section>;
@@ -483,6 +489,13 @@ function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
   const [botId, setBotId] = useState(selected?.id || bots[0]?.id || '');
   const currentBot = bots.find((bot) => bot.id === botId) || selected;
   const [points, setPoints] = useState<SupplyPoint[]>(currentBot?.resupplyPoints || []);
+  const [homeTargets, setHomeTargets] = useState<HomeTarget[]>(currentBot?.homeTargets || []);
+  const [targetName, setTargetName] = useState('矿区');
+  const [targetDimension, setTargetDimension] = useState('');
+  const [targetX, setTargetX] = useState('0');
+  const [targetY, setTargetY] = useState('64');
+  const [targetZ, setTargetZ] = useState('0');
+  const [arrivalHome, setArrivalHome] = useState('');
   const [name, setName] = useState('综合补给站');
   const [home, setHome] = useState('补给');
   const [roles, setRoles] = useState<SupplyRole[]>(['food', 'pickaxe', 'sleep']);
@@ -491,7 +504,9 @@ function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
 
   function selectBot(id: string) {
     setBotId(id);
-    setPoints(bots.find((bot) => bot.id === id)?.resupplyPoints || []);
+    const nextBot = bots.find((bot) => bot.id === id);
+    setPoints(nextBot?.resupplyPoints || []);
+    setHomeTargets(nextBot?.homeTargets || []);
     setError('');
   }
 
@@ -534,6 +549,31 @@ function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
     await run(() => configureSupply(botId, nextPoints), true);
   }
 
+  function addHomeTarget() {
+    const x = Number(targetX);
+    const y = Number(targetY);
+    const z = Number(targetZ);
+    const cleanName = targetName.trim().replace(/\s+/g, '_');
+    if (!cleanName || ![x, y, z].every(Number.isFinite)) { setError('Home 目标需要名称和有效的 X/Y/Z 坐标。'); return; }
+    setHomeTargets((current) => [...current, { id: `target-${Date.now()}`, name: cleanName, dimension: targetDimension.replace(/^minecraft:/, '').trim() || null, x, y, z, arrivalHome: arrivalHome.trim() || null, enabled: true, useServerTeleport: true, lastSetAt: null }]);
+    setError('');
+  }
+
+  function updateHomeTarget(id: string, patch: Partial<HomeTarget>) {
+    setHomeTargets((current) => current.map((target) => target.id === id ? { ...target, ...patch } : target));
+  }
+
+  async function saveHomeTargets(nextTargets = homeTargets) {
+    if (!botId) return;
+    if (nextTargets.some((target) => !target.name || ![target.x, target.y, target.z].every(Number.isFinite))) { setError('Home 目标的名称和坐标不能为空。'); return; }
+    setError('');
+    await run(() => configureHomeTargets(botId, nextTargets), true);
+  }
+
+  async function setTargetHome(target: HomeTarget) {
+    await run(() => setHomeTarget(botId, target.id), true);
+  }
+
   async function initializeHome(point: SupplyPoint) {
     const bot = bots.find((item) => item.id === botId);
     if (!point.home) { setError('请先填写 Home 名称。'); return; }
@@ -550,6 +590,7 @@ function SupplySkillSettings({ bots, selected, run }: { bots: BotStatus[]; selec
     <div className="supply-explainer"><strong>推荐结构</strong><span><code>/home 补给</code>：食物 + 镐子 + 床</span><span><code>/home 存储</code>：多个箱子 / 木桶 / 潜影盒</span><small>区域挖矿使用稳定的初始挖矿 Home 回程；机器人首次访问补给 Home 会自动记录锚点。</small></div>
     <label>目标机器人<select value={botId} onChange={(event) => selectBot(event.target.value)}>{bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.displayName}</option>)}</select></label>
     {currentBot?.homes?.length ? <div className="known-home-list"><strong>机器人已知 Home</strong><div>{currentBot.homes.map((knownHome) => <span className={`known-home-chip ${knownHome.initialized ? 'ready' : 'pending'}`} key={knownHome.id}><b>{knownHome.name}</b><small>{knownHome.label} · {knownHome.initialized ? `${knownHome.position?.x}, ${knownHome.position?.y}, ${knownHome.position?.z}` : '待初始化'}</small></span>)}</div>{currentBot.homeActivity && <small className="home-activity">{currentBot.homeActivity.message}</small>}</div> : <div className="known-home-list pending"><strong>机器人已知 Home</strong><span>保存 Home 映射或开始区域挖矿后，这里会显示所有 Home 及其锚点。</span></div>}
+    <div className="home-target-builder"><div className="settings-heading"><div><span className="eyebrow">HOME TARGET SKILL</span><h3>自动前往指定地点设定 Home</h3></div><span className="soft-badge">同维度寻路 / 跨维度传送</span></div><p className="muted">填入目标坐标后，机器人会自行前往并执行 <code>/sethome 名称</code>。跨维度优先使用“抵达 Home”；没有抵达 Home 时会尝试服务器传送命令，因此需要对应权限。</p><div className="form-grid"><label>Home 名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} placeholder="矿区" /></label><label>维度<input value={targetDimension} onChange={(event) => setTargetDimension(event.target.value)} placeholder="overworld / the_nether / the_end" /></label><label>X<input type="number" value={targetX} onChange={(event) => setTargetX(event.target.value)} /></label><label>Y<input type="number" value={targetY} onChange={(event) => setTargetY(event.target.value)} /></label><label>Z<input type="number" value={targetZ} onChange={(event) => setTargetZ(event.target.value)} /></label><label>跨维度抵达 Home（可选）<input value={arrivalHome} onChange={(event) => setArrivalHome(event.target.value)} placeholder="例如 nether_gate" /></label></div><div className="drawer-actions"><button type="button" className="secondary" onClick={addHomeTarget}>＋ 添加 Home 目标</button><button type="button" className="primary" onClick={() => saveHomeTargets()}>保存 Home 技能目标</button></div>{homeTargets.length ? <div className="home-target-list">{homeTargets.map((target) => <article className="home-target-card" key={target.id}><div><strong>{target.name}</strong><small>{target.dimension || '当前维度'} · {target.x}, {target.y}, {target.z}{target.arrivalHome ? ` · 通过 ${target.arrivalHome}` : ''}</small></div><label className="toggle-row compact-toggle"><input type="checkbox" checked={target.enabled} onChange={(event) => updateHomeTarget(target.id, { enabled: event.target.checked })} /><span />启用</label><button type="button" className="secondary" disabled={currentBot?.state !== 'online' || !target.enabled} onClick={() => setTargetHome(target)}>前往并设 Home</button><button type="button" className="icon-button" onClick={() => setHomeTargets((current) => current.filter((item) => item.id !== target.id))}>×</button><small>{target.lastSetAt ? `上次设定：${new Date(target.lastSetAt).toLocaleString()}` : '尚未执行'}</small></article>)}</div> : null}</div>
     <div className="station-builder"><div className="form-grid"><label>站点名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="综合补给站" /></label><label>服务器 Home 名称<input value={home} onChange={(event) => setHome(event.target.value)} placeholder="补给" /></label><label>自动扫描半径<input type="number" min="2" max="32" value={scanRadius} onChange={(event) => setScanRadius(Math.max(2, Math.min(32, Number(event.target.value) || 8)))} /></label></div><div className="station-role-picker">{(Object.keys(supplyRoleLabels) as SupplyRole[]).map((role) => <button type="button" className={roles.includes(role) ? 'active' : ''} key={role} onClick={() => toggleDraftRole(role)}>{supplyRoleLabels[role]}</button>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={() => addPoint('supply')}>＋ 综合补给模板</button><button type="button" className="secondary" onClick={() => addPoint('storage')}>＋ 矿物仓库模板</button><button type="button" className="primary" onClick={() => addPoint()}>加入站点列表</button></div></div>
     {error && <p className="form-error">{error}</p>}
     <div className="home-station-list">{points.length ? points.map((point) => <article className="home-station-card" key={point.id}><div className="home-station-head"><div><input value={point.name} onChange={(event) => updatePoint(point.id, { name: event.target.value })} aria-label="站点名称" /><span>{point.home ? `/home ${point.home}` : '旧坐标补给点'}</span></div><label className="toggle-row compact-toggle"><input type="checkbox" checked={point.enabled} onChange={(event) => updatePoint(point.id, { enabled: event.target.checked })} /><span />启用</label><button type="button" className="icon-button" onClick={() => setPoints((current) => current.filter((item) => item.id !== point.id))}>×</button></div><div className="home-station-fields"><label>Home 名称<input value={point.home || ''} onChange={(event) => updatePoint(point.id, { home: event.target.value || null })} placeholder="补给" /></label><label>扫描半径<input type="number" min="2" max="32" value={point.scanRadius || 8} onChange={(event) => updatePoint(point.id, { scanRadius: Math.max(2, Math.min(32, Number(event.target.value) || 8)) })} /></label><label>优先级<input type="number" min="0" max="100" value={point.priority || 0} onChange={(event) => updatePoint(point.id, { priority: Number(event.target.value) || 0 })} /></label></div><div className="station-role-picker compact">{(Object.keys(supplyRoleLabels) as SupplyRole[]).map((role) => <button type="button" className={point.roles.includes(role) ? 'active' : ''} key={role} onClick={() => togglePointRole(point.id, role)}>{supplyRoleLabels[role]}</button>)}</div><div className="station-anchor"><span>{[point.x, point.y, point.z].every((value) => Number.isFinite(value)) ? `安全锚点 ${point.x}, ${point.y}, ${point.z} · ${point.dimension || '任意维度'}` : '尚未记录安全锚点，请让机器人站在 Home 中初始化'}</span><label><input type="checkbox" checked={point.autoDiscover !== false} onChange={(event) => updatePoint(point.id, { autoDiscover: event.target.checked })} /> 自动发现附近容器与床</label></div><div className="home-station-actions"><button type="button" className="secondary" disabled={currentBot?.state !== 'online' || !point.home} onClick={() => initializeHome(point)}>在当前位置 /sethome 并记录锚点</button><button type="button" className="secondary" disabled={currentBot?.state !== 'online' || !point.home} onClick={() => run(() => sendCommand(botId, `home ${point.home}`))}>测试前往</button></div></article>) : <p className="muted">还没有 Home 站点。先添加“综合补给模板”和“矿物仓库模板”；区域挖矿的初始 Home 会在机器人开始挖矿时自动建立。</p>}</div>
