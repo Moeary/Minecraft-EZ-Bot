@@ -5,14 +5,13 @@ const ROOT_DIR = path.resolve(__dirname, '../../../..');
 const CONFIG_DIR = path.join(ROOT_DIR, 'config');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 
-const SKILL_KEYS = ['combat', 'fishing', 'pathfinder', 'mining', 'supply', 'survival', 'chat-command', 'openai-tools'];
+const SKILL_KEYS = ['combat', 'fishing', 'pathfinder', 'mining', 'supply', 'chat-command', 'openai-tools'];
 const DEFAULT_SKILL_PRIORITIES = {
   combat: 55,
   fishing: 20,
   pathfinder: 30,
   mining: 45,
   supply: 85,
-  survival: 75,
   'chat-command': 10,
   'openai-tools': 1
 };
@@ -26,14 +25,28 @@ function readJson(filePath, fallback) {
   }
 }
 
+function firstDefined(sources, field) {
+  for (const source of sources) {
+    if (source && Object.prototype.hasOwnProperty.call(source, field)) return source[field];
+  }
+  return undefined;
+}
+
 function normalizeSkillSettings(base = {}, override = {}) {
   const result = {};
   for (const key of SKILL_KEYS) {
     const inherited = base?.[key] || {};
     const requested = override?.[key] || {};
+    const sources = key === 'supply'
+      ? [requested, override?.survival, inherited, base?.survival]
+      : [requested, inherited];
+    const enabled = firstDefined(sources, 'enabled');
+    const priority = firstDefined(sources, 'priority');
+    const autoStart = firstDefined(sources, 'autoStart');
     result[key] = {
-      enabled: requested.enabled === undefined ? (inherited.enabled === undefined ? key === 'chat-command' : Boolean(inherited.enabled)) : requested.enabled === true,
-      priority: Number.isFinite(Number(requested.priority)) ? Number(requested.priority) : (Number.isFinite(Number(inherited.priority)) ? Number(inherited.priority) : DEFAULT_SKILL_PRIORITIES[key])
+      enabled: enabled === undefined ? key === 'chat-command' : enabled === true,
+      priority: Number.isFinite(Number(priority)) ? Number(priority) : DEFAULT_SKILL_PRIORITIES[key],
+      autoStart: autoStart === true
     };
   }
   return result;

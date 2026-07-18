@@ -8,7 +8,6 @@ const skills = [
   require('./chat-command'),
   require('./mining'),
   require('./supply'),
-  require('./survival'),
   require('./openai-tools')
 ];
 

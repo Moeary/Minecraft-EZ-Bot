@@ -1,9 +1,9 @@
-/** Supply uses only inventory items and explicitly configured container points. */
+/** Home supply combines local inventory care, fixed Home resupply, storage and nighttime sleep. */
 module.exports = {
   id: 'supply',
-  name: '自动补给与装备管理',
-  description: '自动进食、装备合适工具，并在背包紧张时从配置的补给点存取物品。不会随机打开世界里的箱子。',
-  commands: ['supply on', 'supply off', 'resupply on', 'resupply off', 'resupply point add <x> <y> <z>', 'equip auto|pickaxe|axe|weapon'],
-  openaiTools: [{ name: 'manage_supply', description: 'Enable inventory-backed food and equipment management using configured supply points.', parameters: { enabled: 'boolean', role: 'string' } }],
+  name: 'Home 补给、生存与仓储',
+  description: '自动进食和换装，并且只在已初始化的 Home 安全锚点附近补充食物与镐子、卸载矿物和夜间睡觉。',
+  commands: ['supply on', 'supply off', 'resupply status', 'sleep on', 'sleep off', 'equip auto|pickaxe|axe|weapon'],
+  openaiTools: [{ name: 'manage_home_supply', description: 'Control inventory care, fixed-Home resupply, storage and nighttime sleep.', parameters: { enabled: 'boolean', sleep: 'boolean', role: 'string' } }],
   handler: 'managed-bot.setSupply'
 };

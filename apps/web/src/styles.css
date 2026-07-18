@@ -186,7 +186,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .skill-policy-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
 .skill-policy-toolbar select, .skill-policy-toolbar button, .supply-settings select { min-height: 42px; }
 .skill-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.skill-policy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto 70px auto; gap: 8px; align-items: center; border: 1px solid var(--line, #dfe9e2); border-radius: 14px; padding: 12px 14px; background: #fbfdfb; }
+.skill-policy-row { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto auto 70px auto; gap: 8px; align-items: center; border: 1px solid var(--line, #dfe9e2); border-radius: 14px; padding: 12px 14px; background: #fbfdfb; }
 .skill-policy-name { display: flex; gap: 8px; align-items: center; font-weight: 700; }
 .skill-policy-name b { color: #168344; }
 .priority-input { width: 64px; }

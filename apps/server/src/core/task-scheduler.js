@@ -1,7 +1,6 @@
 const DEFAULT_TASK_PRIORITIES = {
   emergency: 100,
   supply: 85,
-  survival: 75,
   combat: 55,
   mining: 45,
   pathfinder: 30,

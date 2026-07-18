@@ -4,7 +4,19 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { BotManager } = require('../src/core/bot-manager');
+const { normalizeSkillSettings, SKILL_KEYS } = require('../src/config/load-config');
 
+test('merges legacy survival settings into safe Home supply policy', () => {
+  const normalized = normalizeSkillSettings({}, {
+    survival: { enabled: true, priority: 77 }
+  });
+
+  assert.equal(normalized.supply.enabled, true);
+  assert.equal(normalized.supply.priority, 77);
+  assert.equal(normalized.supply.autoStart, false);
+  assert.equal('survival' in normalized, false);
+  assert.equal(SKILL_KEYS.includes('survival'), false);
+});
 function createConfig() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-bot-manager-'));
   return {
@@ -108,6 +120,7 @@ test('persists global and per-bot skill policies and copies them between bots', 
   assert.equal(copyResult.ok, true);
   assert.equal(manager.get('beta').effectiveSkillConfig().combat.priority, 92);
   assert.equal(manager.get('beta').effectiveSkillConfig().supply.enabled, true);
+  assert.equal(manager.get('beta').effectiveSkillConfig().supply.autoStart, false);
 
   const saved = JSON.parse(fs.readFileSync(config.botsPath, 'utf8'));
   assert.equal(saved.defaults.skills.mining.priority, 68);

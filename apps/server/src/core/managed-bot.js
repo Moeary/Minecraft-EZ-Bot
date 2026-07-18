@@ -193,7 +193,6 @@ class ManagedBot extends EventEmitter {
       this.startAttackLoop();
       this.startResourceMonitor();
       this.applyConfiguredSkills();
-      if (this.sleepEnabled || this.resupplyEnabled) this.startMaintenanceLoop();
       this.log('Ready for commands.');
     });
 
@@ -293,45 +292,38 @@ class ManagedBot extends EventEmitter {
     this.skillConfig = skills;
     this.taskScheduler.configure(skills);
     this.chatLogEnabled = skills['chat-command'].enabled;
-    if (skills.combat.enabled) {
-      this.killAuraEnabled = true;
-    } else {
+
+    if (!skills.combat.enabled) {
       this.killAuraEnabled = false;
       this.bot?.pvp?.stop?.();
+    } else if (skills.combat.autoStart) {
+      this.killAuraEnabled = true;
     }
-    if (skills.supply.enabled) {
-      this.setSupply('on', false);
-      this.resupplyEnabled = true;
-    } else {
+
+    if (!skills.supply.enabled) {
       this.setSupply('off', false);
-      this.resupplyEnabled = false;
+    } else if (skills.supply.autoStart) {
+      this.setSupply('on', false);
     }
-    if (skills.survival.enabled) {
-      this.sleepEnabled = true;
-      this.resupplyEnabled = true;
-      this.startMaintenanceLoop();
-    } else {
-      this.sleepEnabled = false;
-      if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
-      this.maintenanceTimer = null;
-      if (!skills.supply.enabled) this.resupplyEnabled = false;
-    }
+
     if (!skills.fishing.enabled && this.fishing) {
       this.fishing = false;
       if (this.fishingTimer) clearTimeout(this.fishingTimer);
       this.fishingTimer = null;
-    } else if (skills.fishing.enabled && !this.fishing) {
+    } else if (skills.fishing.enabled && skills.fishing.autoStart && !this.fishing) {
       this.startFishing(false);
     }
+
     if (!skills.mining.enabled) {
       this.mining = false;
       this.miningTarget = null;
       if (this.miningTimer) clearTimeout(this.miningTimer);
       this.miningTimer = null;
       if (this.regionMining) this.stopRegionMining();
-    } else if (this.regionPlan && !this.regionMining && !this.mining) {
+    } else if (skills.mining.autoStart && this.regionPlan && !this.regionMining && !this.mining) {
       this.startRegionMining(false);
     }
+
     if (skills.pathfinder.enabled) this.log('Pathfinder skill enabled; navigation is available to other skills.');
   }
 
@@ -350,6 +342,7 @@ class ManagedBot extends EventEmitter {
     saveBotsConfig(this.config, next);
     this.config.bots = next;
     this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    if (this.supply && (this.sleepEnabled || this.resupplyEnabled)) this.startMaintenanceLoop();
     this.emit('state', this.publicStatus());
     return this.resupplyPoints;
   }
@@ -380,6 +373,8 @@ class ManagedBot extends EventEmitter {
     this.fishing = false;
     this.mining = false;
     this.supply = false;
+    this.sleepEnabled = false;
+    this.resupplyEnabled = false;
     this.regionMining = false;
     this.digging = false;
     if (this.regionPlan) this.regionPlan.active = false;
@@ -1063,13 +1058,19 @@ class ManagedBot extends EventEmitter {
 
   setSleepMode(mode = 'on', announce = true) {
     const normalized = String(mode || 'on').toLowerCase();
-    this.sleepEnabled = !['off', 'stop', 'disable'].includes(normalized);
-    if (this.sleepEnabled) this.startMaintenanceLoop();
-    else if (!this.resupplyEnabled && this.maintenanceTimer) {
+    const enabled = !['off', 'stop', 'disable'].includes(normalized);
+    this.sleepEnabled = enabled;
+    if (enabled) {
+      const wasEnabled = this.supply;
+      this.supply = true;
+      if (this.bot?.autoEat?.enable) this.bot.autoEat.enable();
+      if (!wasEnabled) this.supplyLoop();
+      this.startMaintenanceLoop();
+    } else if (!this.resupplyEnabled && this.maintenanceTimer) {
       clearTimeout(this.maintenanceTimer);
       this.maintenanceTimer = null;
     }
-    const message = `[${this.bot.username}] Automatic sleep ${this.sleepEnabled ? 'enabled' : 'disabled'}.`;
+    const message = `[${this.bot.username}] Automatic sleep ${enabled ? 'enabled' : 'disabled'} (part of Home supply).`;
     return announce ? this.respond(message) : { ok: true, message };
   }
 
@@ -1087,9 +1088,13 @@ class ManagedBot extends EventEmitter {
   executeResupplyCommand(args = []) {
     const action = String(args[0] || 'status').toLowerCase();
     if (action === 'on' || action === 'enable') {
+      const wasEnabled = this.supply;
+      this.supply = true;
       this.resupplyEnabled = true;
+      if (this.bot?.autoEat?.enable) this.bot.autoEat.enable();
+      if (!wasEnabled) this.supplyLoop();
       this.startMaintenanceLoop();
-      return this.respond(`[${this.bot.username}] Resupply enabled. Only configured supply points will be opened.`);
+      return this.respond(`[${this.bot.username}] Home supply enabled. Only initialized supply points will be used.`);
     }
     if (action === 'off' || action === 'disable') {
       this.resupplyEnabled = false;
@@ -1097,7 +1102,7 @@ class ManagedBot extends EventEmitter {
         clearTimeout(this.maintenanceTimer);
         this.maintenanceTimer = null;
       }
-      return this.respond(`[${this.bot.username}] Resupply disabled.`);
+      return this.respond(`[${this.bot.username}] Home resupply paused; local food/equipment care remains ${this.supply ? 'enabled' : 'disabled'}.`);
     }
     const pointAction = String(args[1] || '').toLowerCase();
     if (action === 'point' && pointAction === 'add') {
@@ -1113,7 +1118,7 @@ class ManagedBot extends EventEmitter {
       this.persistResupplyPoints();
       return this.respond(`[${this.bot.username}] Supply points cleared.`);
     }
-    if (action === 'status') return this.respond(`[${this.bot.username}] Resupply ${this.resupplyEnabled ? 'ON' : 'OFF'}; points: ${this.resupplyPoints.length}.`);
+    if (action === 'status') return this.respond(`[${this.bot.username}] Home supply ${this.supply ? 'ON' : 'OFF'}; anchored points: ${this.resupplyPoints.filter((point) => this.hasSupplyAnchor(point)).length}.`);
     return this.respond(`[${this.bot.username}] Usage: resupply on|off|status|point add <x> <y> <z>|point clear`);
   }
 
@@ -1147,9 +1152,15 @@ class ManagedBot extends EventEmitter {
     return !role || !Array.isArray(point.roles) || point.roles.length === 0 || point.roles.includes(role);
   }
 
-  matchingSupplyPoints(role = null) {
+  matchingSupplyPoints(role = null, options = {}) {
     const dimension = this.currentDimension();
-    return this.resupplyPoints.filter((point) => point.enabled !== false && this.supplyPointSupports(point, role) && (point.home || !point.dimension || point.dimension === dimension));
+    const requireAnchor = options.requireAnchor === true;
+    return this.resupplyPoints.filter((point) => (
+      point.enabled !== false
+      && this.supplyPointSupports(point, role)
+      && (!requireAnchor || this.hasSupplyAnchor(point))
+      && (point.home || !point.dimension || point.dimension === dimension)
+    ));
   }
 
   checkpointName() {
@@ -1294,17 +1305,17 @@ class ManagedBot extends EventEmitter {
     if (!bot?.time || bot.isSleeping) return;
     const time = Number(bot.time.timeOfDay);
     if (!(time >= 12541 && time <= 23458)) return;
-    const points = this.matchingSupplyPoints('sleep').sort((a, b) => b.priority - a.priority);
+    const points = this.matchingSupplyPoints('sleep', { requireAnchor: true }).sort((a, b) => b.priority - a.priority);
     if (!points.length) {
-      this.resourceAlert('no-supply-bed', true, '夜晚到了，但没有配置带“睡觉”角色的 Home 补给点。', 120000);
+      this.resourceAlert('no-supply-bed', true, '夜晚到了，但没有已初始化且带“睡觉”角色的 Home 补给点；已停止自动移动。', 120000);
       return;
     }
     for (const point of points) {
       try {
-        const slept = await this.withSupplyPoint(point, 'survival', async () => {
+        const slept = await this.withSupplyPoint(point, 'supply', async () => {
           const bed = this.findSupplyBed(point);
           if (!bed || !bot.sleep) return false;
-          await this.moveToBlock(bed, 'survival');
+          await this.moveToBlock(bed, 'supply');
           if (!this.sleepEnabled || bot.isSleeping) return true;
           await bot.sleep(bed);
           this.log(`Sleeping at configured supply Home: ${point.name}.`);
@@ -1489,7 +1500,7 @@ class ManagedBot extends EventEmitter {
       return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
     }
 
-    const points = this.matchingSupplyPoints().filter((point) => (
+    const points = this.matchingSupplyPoints(null, { requireAnchor: true }).filter((point) => (
       (needStorage && this.supplyPointSupports(point, 'storage')) ||
       (needPickaxe && this.supplyPointSupports(point, 'pickaxe')) ||
       (needFood && this.supplyPointSupports(point, 'food'))
@@ -1501,7 +1512,7 @@ class ManagedBot extends EventEmitter {
 
     if (!points.length) {
       const roles = [needStorage && '矿物存储', needPickaxe && '镐子补给', needFood && '食物补给'].filter(Boolean).join('、');
-      return { ok: false, reason: 'no-point', message: `没有配置支持${roles}的 Home 补给点` };
+      return { ok: false, reason: 'no-point', message: `没有已初始化且支持${roles}的 Home 补给点；已停止自动移动` };
     }
 
     this.resupplyBusy = true;
@@ -1563,18 +1574,26 @@ class ManagedBot extends EventEmitter {
     const normalized = String(mode || 'on').toLowerCase();
     if (['off', 'stop', 'disable'].includes(normalized)) {
       this.supply = false;
+      this.sleepEnabled = false;
+      this.resupplyEnabled = false;
       if (this.supplyTimer) clearTimeout(this.supplyTimer);
+      if (this.maintenanceTimer) clearTimeout(this.maintenanceTimer);
       this.supplyTimer = null;
+      this.maintenanceTimer = null;
       if (this.bot?.autoEat?.disable) this.bot.autoEat.disable();
-      const message = `[${this.bot?.username || this.displayName}] Supply management disabled.`;
+      const message = `[${this.bot?.username || this.displayName}] Home supply, sleep and storage automation disabled.`;
       return announce ? this.respond(message) : { ok: true, message };
     }
     const wasEnabled = this.supply;
     this.supply = true;
+    this.sleepEnabled = true;
+    this.resupplyEnabled = true;
     if (this.bot?.autoEat?.enable) this.bot.autoEat.enable();
-    this.log('Supply and equipment management enabled.');
+    this.log('Home supply, equipment, storage and nighttime survival enabled.');
     if (!wasEnabled) this.supplyLoop();
-    const message = `[${this.bot?.username || this.displayName}] Supply management enabled.`;
+    this.startMaintenanceLoop();
+    const anchored = this.resupplyPoints.filter((point) => point.enabled !== false && this.hasSupplyAnchor(point)).length;
+    const message = `[${this.bot?.username || this.displayName}] Home supply enabled${anchored ? ` (${anchored} anchored station${anchored === 1 ? '' : 's'})` : '; no anchored station yet, autonomous movement is paused'}.`;
     return announce ? this.respond(message) : { ok: true, message };
   }
 
@@ -1609,7 +1628,6 @@ class ManagedBot extends EventEmitter {
     if (this.fishing) active.push('fishing');
     if (this.mining || this.regionMining) active.push('mining');
     if (this.supply) active.push('supply');
-    if (this.sleepEnabled || this.resupplyEnabled) active.push('survival');
     if (this.chatLogEnabled) active.push('chat-command');
     return active;
   }
