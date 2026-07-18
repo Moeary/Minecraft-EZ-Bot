@@ -30,6 +30,20 @@ export interface ViewerConfig {
   firstPerson: boolean;
 }
 
+export interface KnownHome {
+  id: string;
+  name: string;
+  type: 'mining' | 'supply' | 'storage';
+  label: string;
+  dimension: string | null;
+  position: SupplyCoordinate | null;
+  initialized: boolean;
+  active: boolean;
+  phase?: string;
+  roles?: SupplyRole[];
+  scanRadius?: number;
+}
+
 export interface BotDefinition {
   id: string;
   displayName: string;
@@ -44,7 +58,7 @@ export interface BotDefinition {
   commandWhitelist?: string[] | null;
   resupplyPoints?: SupplyPoint[];
   skills?: SkillSettings | null;
-  miningRegion?: { bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }; mode: 'blacklist' | 'whitelist'; allow: string[]; deny: string[] } | null;
+  miningRegion?: { bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }; dimension?: string | null; home?: string | null; anchor?: SupplyCoordinate | null; mode: 'blacklist' | 'whitelist'; allow: string[]; deny: string[] } | null;
 }
 
 export interface BotStatus {
@@ -70,8 +84,10 @@ export interface BotStatus {
   supply: boolean;
   sleepEnabled?: boolean;
   resupplyEnabled?: boolean;
-  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; customDeny?: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
+  region?: { bounds: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; volume: number; mode: string; allow: string[]; deny: string[]; customDeny?: string[]; cursor: number; scanned: number; mined: number; active: boolean; pausedReason: string | null; phase?: string; dimension?: string | null; home?: string | null; anchor?: SupplyCoordinate | null; lastBlock: { name: string; position: { x: number; y: number; z: number } } | null } | null;
   resupplyPoints?: SupplyPoint[];
+  homes?: KnownHome[];
+  homeActivity?: { home: string; type: 'mining' | 'supply'; state: string; message: string } | null;
   skills: SkillSettings;
   activeSkills: string[];
   scheduler?: { active: string | null; queued: string[]; priorities: Record<string, number> };

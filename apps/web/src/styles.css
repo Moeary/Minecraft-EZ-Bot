@@ -210,6 +210,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .mining-settings, .supply-settings { color: #183126; }
 .mining-top-grid { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 10px; }
 .mining-mode button { display: grid; gap: 3px; text-align: left; }
+.mining-anchor-status { display: flex; justify-content: space-between; gap: 14px; align-items: center; border: 1px solid #cfe6d3; border-radius: 12px; padding: 11px 13px; background: #f4fbf5; color: #3f6f4d; }
+.mining-anchor-status strong, .mining-anchor-status span { display: block; }
+.mining-anchor-status strong { color: #1c6237; font-size: 12px; }
+.mining-anchor-status span { margin-top: 4px; color: #779181; font-size: 10px; }
+.mining-anchor-status > b { border-radius: 999px; padding: 5px 8px; background: #e4f4e6; color: #277542; font: 10px 'DM Mono', monospace; white-space: nowrap; }
 .mining-mode button b { font-size: 13px; }
 .mining-mode button small { color: #82958a; font-size: 10px; font-weight: 500; }
 .mining-mode button.active small { color: #4f8160; }
@@ -238,6 +243,14 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .supply-explainer strong { color: #1d5f36; }
 .supply-explainer small { grid-column: 1 / -1; color: #799082; }
 .supply-explainer code { color: #19703c; }
+.known-home-list { display: grid; gap: 8px; border: 1px solid #d9e9dc; border-radius: 12px; padding: 11px 13px; background: #fbfefb; color: #547461; font-size: 11px; }
+.known-home-list > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.known-home-chip { display: grid; gap: 3px; border: 1px solid #e5ece6; border-radius: 9px; padding: 7px 9px; background: #fff; }
+.known-home-chip.ready { border-color: #b9ddbf; background: #f1faf2; }
+.known-home-chip.pending { border-color: #ecd9a7; background: #fffaf0; }
+.known-home-chip b { color: #246d3d; font: 10px 'DM Mono', monospace; }
+.known-home-chip small, .home-activity { color: #7d9084; font-size: 9px; }
+.known-home-list.pending { color: #8a8068; }
 .station-builder { display: grid; gap: 12px; border: 1px dashed #bcd7c2; border-radius: 14px; padding: 15px; background: #f8fcf8; }
 .station-builder .form-grid { grid-template-columns: 1.4fr 1fr .7fr; }
 .station-role-picker { display: flex; flex-wrap: wrap; gap: 8px; }

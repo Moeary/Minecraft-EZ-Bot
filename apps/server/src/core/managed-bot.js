@@ -47,6 +47,27 @@ function cleanBlockName(name) {
   return String(name || '').toLowerCase().replace(/^minecraft:/, '').trim();
 }
 
+function cleanDimension(name) {
+  return String(name || '').replace(/^minecraft:/, '').trim() || null;
+}
+
+function cleanHomeName(name) {
+  return String(name || '').trim().replace(/^\/?(?:sethome|home)\s+/i, '').replace(/\s+/g, '_') || null;
+}
+
+function normalizePosition(value) {
+  if (!value || typeof value !== 'object') return null;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const z = Number(value.z);
+  if (![x, y, z].every(Number.isFinite)) return null;
+  return {
+    x: Math.round(x * 100) / 100,
+    y: Math.round(y * 100) / 100,
+    z: Math.round(z * 100) / 100
+  };
+}
+
 function isRegionContainerName(name) {
   const normalized = cleanBlockName(name);
   return REGION_CONTAINER_NAMES.has(normalized) || normalized.endsWith('_shulker_box');
@@ -83,6 +104,7 @@ class ManagedBot extends EventEmitter {
     this.regionPlan = this.hydrateRegionPlan(botConfig.miningRegion);
     this.regionMining = false;
     this.regionSeals = [];
+    this.homeActivity = null;
     this.sleepEnabled = false;
     this.resupplyEnabled = false;
     this.resupplyBusy = false;
@@ -163,7 +185,17 @@ class ManagedBot extends EventEmitter {
       bot.loadPlugin(pathfinder);
       bot.loadPlugin(autoEat);
       bot.loadPlugin(pvp);
-      this.bot = bot;
+        this.bot = bot;
+      if (bot._client?.on) {
+        bot._client.on('error', (error) => {
+          if (this.bot !== bot) return;
+          const message = String(error?.message || error || 'Minecraft protocol stream error');
+          this.lastError = message;
+          this.log(`Minecraft protocol stream error: ${message}`, 'error');
+          const text = message.toLowerCase();
+          if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint')) this.scheduleReconnect('protocol_error');
+        });
+      }
     } catch (error) {
       this.lastError = error.message;
       this.log(`Failed to create bot: ${error.message}`, 'error');
@@ -216,6 +248,7 @@ class ManagedBot extends EventEmitter {
       this.log(error.message, 'error');
       const text = error.message.toLowerCase();
       if (text.includes('auth') || text.includes('obtain profile data')) this.scheduleReconnect('auth_error');
+      else if (text.includes('partialreaderror') || text.includes('unexpected buffer end') || text.includes('varint')) this.scheduleReconnect('protocol_error');
       else if (error.code === 'ECONNRESET') this.scheduleReconnect('network_error');
     });
   }
@@ -635,6 +668,7 @@ class ManagedBot extends EventEmitter {
   hydrateRegionPlan(input) {
     if (!input?.bounds) return null;
     const bounds = input.bounds;
+    const anchor = normalizePosition(input.anchor);
     const values = [bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ].map(Number);
     if (values.some((value) => !Number.isInteger(value))) return null;
     const [minX, minY, minZ, maxX, maxY, maxZ] = values;
@@ -650,6 +684,9 @@ class ManagedBot extends EventEmitter {
     const customDeny = Array.isArray(input.deny) ? input.deny.map(cleanBlockName).filter(Boolean) : [];
     return {
       bounds: normalizedBounds,
+      dimension: cleanDimension(input.dimension),
+      home: cleanHomeName(input.home) || this.miningHomeName(),
+      anchor,
       volume,
       mode,
       allow,
@@ -660,6 +697,7 @@ class ManagedBot extends EventEmitter {
       mined: 0,
       active: false,
       pausedReason: null,
+      phase: 'idle',
       lastBlock: null,
       pending: null,
       retryCount: 0
@@ -670,6 +708,9 @@ class ManagedBot extends EventEmitter {
     if (!this.regionPlan) return null;
     return {
       bounds: { ...this.regionPlan.bounds },
+      dimension: this.regionPlan.dimension,
+      home: this.regionPlan.home,
+      anchor: this.regionPlan.anchor ? { ...this.regionPlan.anchor } : null,
       mode: this.regionPlan.mode,
       allow: [...this.regionPlan.allow],
       deny: [...(this.regionPlan.customDeny || [])]
@@ -689,8 +730,12 @@ class ManagedBot extends EventEmitter {
     const allow = Array.isArray(input.allow) ? [...new Set(input.allow.map(cleanBlockName).filter(Boolean))] : [];
     const deny = Array.isArray(input.deny) ? [...new Set(input.deny.map(cleanBlockName).filter(Boolean))] : [];
     if (mode === 'whitelist' && !allow.length) return { ok: false, message: 'Whitelist mode needs at least one allowed block.' };
+    const currentDimension = this.bot?.entity ? this.currentDimension() : null;
     this.regionPlan = {
       bounds: parsed.bounds,
+      dimension: cleanDimension(input.dimension) || currentDimension || this.regionPlan?.dimension || null,
+      home: cleanHomeName(input.home) || this.regionPlan?.home || this.miningHomeName(),
+      anchor: null,
       volume: parsed.volume,
       mode,
       allow,
@@ -701,6 +746,7 @@ class ManagedBot extends EventEmitter {
       mined: 0,
       active: false,
       pausedReason: null,
+      phase: 'idle',
       lastBlock: null,
       pending: null,
       retryCount: 0
@@ -781,9 +827,131 @@ class ManagedBot extends EventEmitter {
 
   regionStatusMessage() {
     if (!this.regionPlan) return `[${this.bot.username}] No mining region configured.`;
-    const { bounds, mode, volume, cursor, scanned, mined, active, pausedReason } = this.regionPlan;
+    const { bounds, mode, volume, cursor, scanned, mined, active, pausedReason, phase, home, dimension } = this.regionPlan;
     const progress = volume ? `${Math.min(100, Math.round((cursor / volume) * 100))}%` : '0%';
-    return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
+    const anchor = this.regionPlan.anchor ? `; Home=${home} @ ${this.regionPlan.anchor.x},${this.regionPlan.anchor.y},${this.regionPlan.anchor.z}` : `; Home=${home} (not initialized)`;
+    return `[${this.bot.username}] Region ${active ? 'RUNNING' : 'PAUSED'} [${phase || 'idle'}] ${progress}; ${mined} mined, ${scanned}/${volume} scanned; mode=${mode}; dimension=${dimension || 'unknown'}${anchor}${pausedReason ? `; ${pausedReason}` : ''}. Bounds ${bounds.minX},${bounds.minY},${bounds.minZ} -> ${bounds.maxX},${bounds.maxY},${bounds.maxZ}.`;
+  }
+
+  miningHomeName() {
+    const id = String(this.id || 'bot').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 16) || 'bot';
+    return `_mcbot_${id}_mine`;
+  }
+
+  persistRegionPlan() {
+    if (!this.regionPlan) return;
+    try {
+      const miningRegion = this.serializedRegionPlan();
+      const next = this.config.bots.map((bot) => bot.id === this.id ? { ...bot, miningRegion } : bot);
+      saveBotsConfig(this.config, next);
+      this.config.bots = next;
+      this.definition = next.find((bot) => bot.id === this.id) || this.definition;
+    } catch (error) {
+      this.log(`Could not persist mining Home: ${error.message}`, 'warn');
+    }
+  }
+
+  distanceToRegion(position) {
+    if (!position || !this.regionPlan?.bounds) return Number.POSITIVE_INFINITY;
+    const bounds = this.regionPlan.bounds;
+    const x = Math.max(bounds.minX, Math.min(bounds.maxX, position.x));
+    const y = Math.max(bounds.minY, Math.min(bounds.maxY, position.y));
+    const z = Math.max(bounds.minZ, Math.min(bounds.maxZ, position.z));
+    return position.distanceTo(new Vec3(x, y, z));
+  }
+
+  regionApproachPosition() {
+    const position = this.bot.entity.position;
+    const bounds = this.regionPlan.bounds;
+    return new Vec3(
+      Math.max(bounds.minX, Math.min(bounds.maxX, Math.floor(position.x))),
+      Math.max(bounds.minY, Math.min(bounds.maxY, Math.floor(position.y))),
+      Math.max(bounds.minZ, Math.min(bounds.maxZ, Math.floor(position.z)))
+    );
+  }
+
+  pauseRegionMining(reason, announce = true) {
+    this.regionMining = false;
+    if (this.regionPlan) {
+      this.regionPlan.active = false;
+      this.regionPlan.phase = 'paused';
+      this.regionPlan.pausedReason = reason;
+    }
+    if (this.regionTimer) clearTimeout(this.regionTimer);
+    this.regionTimer = null;
+    this.log(`Region mining paused: ${reason}`, 'warn');
+    if (announce && this.bot) this.respond(`[${this.bot.username}] Region mining paused: ${reason}.`);
+    return { ok: false, message: reason };
+  }
+
+  async ensureRegionAnchor() {
+    const plan = this.regionPlan;
+    const currentDimension = this.currentDimension();
+    if (!plan.dimension) {
+      plan.dimension = currentDimension;
+      this.persistRegionPlan();
+    }
+    if (plan.dimension !== currentDimension) {
+      if (!plan.home || !plan.anchor) {
+        throw new Error(`mining region is in ${plan.dimension}, but its mining Home has not been initialized in that dimension`);
+      }
+      plan.phase = 'teleporting';
+      this.homeActivity = { home: plan.home, type: 'mining', state: 'traveling', message: `前往挖矿 Home（${plan.dimension}）` };
+      const moved = await this.issueServerCommand(`/home ${plan.home}`, true);
+      const arrived = this.currentDimension() === plan.dimension
+        && this.bot.entity.position.distanceTo(new Vec3(plan.anchor.x, plan.anchor.y, plan.anchor.z)) <= 8;
+      if (!moved && !arrived) throw new Error(`home ${plan.home} did not teleport the bot to the mining dimension`);
+      if (!arrived) throw new Error(`home ${plan.home} landed outside the recorded mining anchor`);
+      this.homeActivity = { home: plan.home, type: 'mining', state: 'ready', message: '已返回挖矿锚点' };
+      return;
+    }
+
+    plan.phase = 'navigating';
+    if (this.distanceToRegion(this.bot.entity.position) > 3.5) {
+      await this.moveNearPosition(this.regionApproachPosition(), 2, 'mining');
+    }
+    if (this.distanceToRegion(this.bot.entity.position) > 6) {
+      throw new Error('pathfinder stopped too far away from the configured mining region');
+    }
+
+    plan.home = plan.home || this.miningHomeName();
+    if (plan.anchor && plan.dimension === currentDimension) {
+      this.homeActivity = { home: plan.home, type: 'mining', state: 'ready', message: '已到达挖矿范围，使用已保存锚点' };
+      return;
+    }
+    plan.anchor = normalizePosition(this.bot.entity.position);
+    plan.dimension = currentDimension;
+    plan.phase = 'anchoring';
+    this.homeActivity = { home: plan.home, type: 'mining', state: 'saving', message: '正在建立初始挖矿传送点' };
+    await this.issueServerCommand(`/sethome ${plan.home}`);
+    this.persistRegionPlan();
+    this.homeActivity = { home: plan.home, type: 'mining', state: 'ready', message: '初始挖矿传送点已记录' };
+    this.log(`Mining Home ${plan.home} anchored at ${plan.anchor.x},${plan.anchor.y},${plan.anchor.z} in ${plan.dimension}.`);
+  }
+
+  async ensureMiningPickaxe() {
+    if (this.hasUsablePickaxe()) return true;
+    if (!this.effectiveSkillConfig().supply.enabled) {
+      throw new Error('no usable pickaxe is available and the supply skill is disabled');
+    }
+    this.regionPlan.phase = 'resupplying';
+    const result = await this.maybeResupply({ requirePickaxe: true, requireFood: false, requireStorage: false });
+    if (!result.ok || !this.hasUsablePickaxe()) throw new Error(`pickaxe resupply failed: ${result.message}`);
+    return true;
+  }
+
+  async prepareRegionMining() {
+    try {
+      await this.ensureRegionAnchor();
+      if (!this.regionMining) return;
+      await this.ensureMiningPickaxe();
+      if (!this.regionMining) return;
+      this.regionPlan.phase = 'mining';
+      this.regionPlan.pausedReason = null;
+      this.regionMiningLoop();
+    } catch (error) {
+      this.pauseRegionMining(error.message);
+    }
   }
 
   startRegionMining(announce = true) {
@@ -793,22 +961,25 @@ class ManagedBot extends EventEmitter {
     if (this.regionPlan.mode === 'whitelist' && !this.regionPlan.allow.length) return announce ? this.respond(`[${this.bot.username}] Whitelist mode has no allowed blocks; refusing to start.`) : { ok: false, message: 'Whitelist has no allowed blocks.' };
     this.regionMining = true;
     this.regionPlan.active = true;
+    this.regionPlan.phase = 'preparing';
     this.regionPlan.pausedReason = null;
     this.regionPlan.retryCount = 0;
-    this.log(`Region mining started (${this.regionPlan.mode}, ${this.regionPlan.volume} blocks).`);
-    if (announce) this.respond(`[${this.bot.username}] Region mining started. Containers, fluids, bedrock and protected blocks remain untouched.`);
-    this.regionMiningLoop();
-    return { ok: true, message: 'Region mining started.' };
+    this.log(`Region mining preparation started (${this.regionPlan.mode}, ${this.regionPlan.volume} blocks).`);
+    if (announce) this.respond(`[${this.bot.username}] Preparing region mining: travel to the region, save a mining Home, then verify a pickaxe.`);
+    this.prepareRegionMining();
+    return { ok: true, message: 'Region mining preparation started.' };
   }
 
   stopRegionMining() {
     this.regionMining = false;
     if (this.regionPlan) {
       this.regionPlan.active = false;
+      this.regionPlan.phase = 'paused';
       this.regionPlan.pausedReason = 'stopped by operator';
     }
     if (this.regionTimer) clearTimeout(this.regionTimer);
     this.regionTimer = null;
+    this.bot?.pathfinder?.setGoal(null);
     return this.respond(`[${this.bot.username}] Region mining stopped.`);
   }
 
@@ -835,25 +1006,34 @@ class ManagedBot extends EventEmitter {
     return !this.regionPlan.deny.includes(name);
   }
 
+  isRegionCandidate(block) {
+    if (!this.isRegionTarget(block)) return false;
+    const directions = [
+      new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0),
+      new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)
+    ];
+    return directions.some((direction) => {
+      const neighbor = this.bot.blockAt(block.position.plus(direction));
+      const name = cleanBlockName(neighbor?.name);
+      return Boolean(neighbor && (['air', 'cave_air', 'void_air'].includes(name) || neighbor.boundingBox === 'empty'));
+    });
+  }
+
   findRegionCandidate() {
     const bot = this.bot;
     const pendingPosition = this.regionPlan.pending ? new Vec3(this.regionPlan.pending.x, this.regionPlan.pending.y, this.regionPlan.pending.z) : null;
     if (pendingPosition) {
       const pendingBlock = bot.blockAt(pendingPosition);
-      if (this.isRegionTarget(pendingBlock)) return pendingBlock;
+      if (this.isRegionCandidate(pendingBlock)) return pendingBlock;
       this.regionPlan.pending = null;
       this.regionPlan.retryCount = 0;
     }
     const positions = bot.findBlocks({
-      matching: (block) => {
-        const name = cleanBlockName(block?.name);
-        if (!name || REGION_FLUIDS.has(name) || isRegionProtectedName(name)) return false;
-        return this.regionPlan.mode === 'whitelist' ? this.regionPlan.allow.includes(name) : !this.regionPlan.deny.includes(name);
-      },
+      matching: (block) => this.isRegionCandidate(block),
       maxDistance: 48,
       count: 64
     });
-    return positions.map((position) => bot.blockAt(position)).filter((block) => this.isRegionTarget(block)).sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] || null;
+    return positions.map((position) => bot.blockAt(position)).filter((block) => this.isRegionCandidate(block)).sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] || null;
   }
 
   scanRegionCursor() {
@@ -861,7 +1041,7 @@ class ManagedBot extends EventEmitter {
       const pendingPosition = new Vec3(this.regionPlan.pending.x, this.regionPlan.pending.y, this.regionPlan.pending.z);
       const pendingBlock = this.bot.blockAt(pendingPosition);
       if (!pendingBlock) return { unloaded: pendingPosition };
-      if (this.isRegionTarget(pendingBlock)) return { block: pendingBlock };
+      if (this.isRegionCandidate(pendingBlock)) return { block: pendingBlock };
       this.regionPlan.pending = null;
       this.regionPlan.retryCount = 0;
     }
@@ -871,7 +1051,7 @@ class ManagedBot extends EventEmitter {
       if (!block) return { unloaded: position };
       this.regionPlan.cursor += 1;
       this.regionPlan.scanned += 1;
-      if (this.isRegionTarget(block)) {
+      if (this.isRegionCandidate(block)) {
         this.regionPlan.pending = { x: position.x, y: position.y, z: position.z };
         this.regionPlan.retryCount = 0;
         return { block };
@@ -880,13 +1060,72 @@ class ManagedBot extends EventEmitter {
     return { complete: true };
   }
 
+  async moveNearPosition(position, radius = 2, taskName = 'pathfinder') {
+    const release = await this.taskScheduler.acquire(taskName);
+    try {
+      const movements = new Movements(this.bot, minecraftData(this.bot.version));
+      movements.canDig = false;
+      this.bot.pathfinder.setMovements(movements);
+      await this.gotoPathfinderGoal(new goals.GoalNear(position.x, position.y, position.z, radius), 12000);
+    } finally {
+      release();
+    }
+  }
+
+  async gotoPathfinderGoal(goal, timeoutMs = 12000) {
+    const navigation = Promise.resolve(this.bot.pathfinder.goto(goal));
+    navigation.catch(() => {});
+    let timer = null;
+    try {
+      return await Promise.race([
+        navigation,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('pathfinder timed out while approaching the block')), timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.bot.pathfinder.setGoal(null);
+    }
+  }
+
+  blockApproachPositions(block) {
+    const directions = [
+      new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0),
+      new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)
+    ];
+    return directions.map((direction) => block.position.plus(direction)).filter((position) => {
+      const neighbor = this.bot.blockAt(position);
+      const name = cleanBlockName(neighbor?.name);
+      return neighbor && (['air', 'cave_air', 'void_air'].includes(name) || neighbor.boundingBox === 'empty');
+    }).sort((a, b) => a.distanceTo(this.bot.entity.position) - b.distanceTo(this.bot.entity.position));
+  }
+
   async moveToBlock(block, taskName = 'pathfinder') {
     const release = await this.taskScheduler.acquire(taskName);
     try {
       const movements = new Movements(this.bot, minecraftData(this.bot.version));
       movements.canDig = false;
       this.bot.pathfinder.setMovements(movements);
-      await this.bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
+      const approaches = this.blockApproachPositions(block);
+      let lastError = null;
+      for (const position of approaches.slice(0, 4)) {
+        try {
+          await this.gotoPathfinderGoal(new goals.GoalNear(position.x, position.y, position.z, 1), 10000);
+          await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      try {
+        await this.gotoPathfinderGoal(new goals.GoalLookAtBlock(block.position, this.bot.world, { reach: 4.5 }), 10000);
+        await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+      throw lastError || new Error(`no exposed approach position for ${block.name} at ${block.position}`);
     } finally {
       release();
     }
@@ -942,13 +1181,16 @@ class ManagedBot extends EventEmitter {
         if (scan.complete) {
           this.regionMining = false;
           this.regionPlan.active = false;
+          this.regionPlan.phase = 'complete';
           this.regionPlan.pausedReason = null;
           this.log(`Region mining finished: ${this.regionPlan.mined} blocks mined.`);
           this.respond(`[${this.bot.username}] Region mining finished: ${this.regionPlan.mined} blocks mined. Sealed fluids remain plugged for safety; use unseal only when ready.`);
           return;
         }
         if (scan.unloaded) {
-          await this.moveToBlock({ position: scan.unloaded }, 'mining');
+          this.regionPlan.phase = 'loading';
+          await this.moveNearPosition(scan.unloaded, 2, 'mining');
+          this.regionPlan.phase = 'mining';
           if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 250);
           return;
         }
@@ -959,12 +1201,14 @@ class ManagedBot extends EventEmitter {
       if (!this.regionMining) return;
       const current = this.bot.blockAt(block.position);
       if (this.bot.inventory.emptySlotCount() === 0) {
-        if (this.resupplyEnabled) await this.maybeResupply();
+        if (this.effectiveSkillConfig().supply.enabled) {
+          this.regionPlan.phase = 'resupplying';
+          await this.maybeResupply({ requireStorage: true, requirePickaxe: false, requireFood: false });
+          if (!this.regionMining) return;
+          this.regionPlan.phase = 'mining';
+        }
         if (this.bot.inventory.emptySlotCount() === 0) {
-          this.regionMining = false;
-          this.regionPlan.active = false;
-          this.regionPlan.pausedReason = 'inventory is full; configure a supply point or empty the inventory';
-          this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+          this.pauseRegionMining('inventory is full; configure a storage Home or empty the inventory');
           return;
         }
       }
@@ -977,27 +1221,19 @@ class ManagedBot extends EventEmitter {
       if (!this.bot.canDigBlock(current)) {
         this.regionPlan.retryCount += 1;
         if (this.regionPlan.retryCount >= 5) {
-          this.regionMining = false;
-          this.regionPlan.active = false;
-          this.regionPlan.pausedReason = `cannot reach ${current.name} at ${current.position}`;
-          this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+          this.pauseRegionMining(`cannot get line of sight to ${current.name} at ${current.position}`);
           return;
         }
         this.regionTimer = setTimeout(() => this.regionMiningLoop(), 1000);
         return;
       }
       if (!(await this.sealFluidsAround(current))) {
-        this.regionMining = false;
-        this.regionPlan.active = false;
-        this.log(`Region mining paused: ${this.regionPlan.pausedReason}`, 'warn');
-        this.respond(`[${this.bot.username}] Region mining paused: ${this.regionPlan.pausedReason}.`);
+        this.pauseRegionMining(this.regionPlan.pausedReason || 'could not safely seal nearby fluid');
         return;
       }
       const toolReady = await this.prepareHarvestTool(current, 'Region mining');
       if (!toolReady) {
-        this.regionMining = false;
-        this.regionPlan.active = false;
-        this.regionPlan.pausedReason = 'no usable tool was found';
+        this.pauseRegionMining('no usable harvest tool was found');
         return;
       }
       this.digging = true;
@@ -1015,9 +1251,7 @@ class ManagedBot extends EventEmitter {
       this.regionPlan.pausedReason = error.message;
       this.log(`Region mining cycle failed: ${error.message}`, 'warn');
       if (this.regionPlan.retryCount >= 5) {
-        this.regionMining = false;
-        this.regionPlan.active = false;
-        this.respond(`[${this.bot.username}] Region mining paused after repeated failures: ${error.message}.`);
+        this.pauseRegionMining(`repeated mining failure: ${error.message}`);
         return;
       }
       if (this.regionMining) this.regionTimer = setTimeout(() => this.regionMiningLoop(), 2500);
@@ -1207,7 +1441,12 @@ class ManagedBot extends EventEmitter {
 
   async withSupplyPoint(point, taskName, action) {
     const release = await this.taskScheduler.acquire(taskName);
-    const shouldCheckpoint = Boolean(point.home && (this.mining || this.regionMining));
+    const regionReturn = this.regionMining && this.regionPlan?.home && this.regionPlan?.anchor ? {
+      home: this.regionPlan.home,
+      anchor: { ...this.regionPlan.anchor },
+      dimension: this.regionPlan.dimension
+    } : null;
+    const shouldCheckpoint = Boolean(!regionReturn && point.home && this.mining);
     const checkpoint = shouldCheckpoint ? this.checkpointName() : null;
     const checkpointAnchor = checkpoint && this.bot?.entity ? {
       position: this.bot.entity.position.clone(),
@@ -1219,20 +1458,46 @@ class ManagedBot extends EventEmitter {
         this.log(`Temporary mining checkpoint saved as ${checkpoint}.`);
       }
       if (point.home) {
+        this.homeActivity = { home: point.home, type: 'supply', state: 'traveling', message: `前往补给点：${point.name}` };
         const moved = await this.issueServerCommand(`/home ${point.home}`, true);
-        const verifiedAnchor = this.hasSupplyAnchor(point) && this.isNearSupplyAnchor(point);
-        if (!moved && !verifiedAnchor) {
-          throw new Error(`home ${point.home} did not teleport the bot; initialize or verify this Home before enabling automation`);
+        const arrivedDimension = !point.dimension || this.currentDimension() === point.dimension;
+        const hasAnchor = this.hasSupplyAnchor(point);
+        const verifiedAnchor = hasAnchor && this.isNearSupplyAnchor(point);
+        if (!arrivedDimension) {
+          throw new Error(`home ${point.home} did not teleport the bot to the expected dimension`);
         }
-        if (this.hasSupplyAnchor(point) && !this.isNearSupplyAnchor(point)) {
+        if (hasAnchor && !verifiedAnchor) {
           throw new Error(`home ${point.home} landed outside the configured anchor; refusing to operate at an unsafe location`);
         }
+        if (!hasAnchor && !moved) {
+          throw new Error(`home ${point.home} did not teleport the bot; check the Home name and server permissions`);
+        }
+        if (!this.hasSupplyAnchor(point)) {
+          point.x = this.bot.entity.position.x;
+          point.y = this.bot.entity.position.y;
+          point.z = this.bot.entity.position.z;
+          point.dimension = this.currentDimension();
+          this.persistResupplyPoints();
+          this.log(`Supply Home ${point.home} initialized at ${point.x},${point.y},${point.z} in ${point.dimension}.`);
+        }
+        this.homeActivity = { home: point.home, type: 'supply', state: 'ready', message: `已到达补给点：${point.name}` };
         this.log(`Arrived at configured Home ${point.home} for ${point.name}.`);
       }
       return await action();
     } finally {
-      if (checkpoint && this.bot?.entity) {
-        try {
+      try {
+        if (regionReturn && this.bot?.entity) {
+          this.homeActivity = { home: regionReturn.home, type: 'mining', state: 'traveling', message: '补给完成，返回挖矿锚点' };
+          const returned = await this.issueServerCommand(`/home ${regionReturn.home}`, true);
+          const nearMiningAnchor = (returned || this.currentDimension() === regionReturn.dimension)
+            && this.currentDimension() === regionReturn.dimension
+            && this.bot.entity.position.distanceTo(new Vec3(regionReturn.anchor.x, regionReturn.anchor.y, regionReturn.anchor.z)) <= 8;
+          if (!nearMiningAnchor) {
+            this.pauseRegionMining(`could not verify return to mining Home ${regionReturn.home}`);
+          } else {
+            this.homeActivity = { home: regionReturn.home, type: 'mining', state: 'ready', message: '已返回挖矿锚点' };
+          }
+        } else if (checkpoint && this.bot?.entity) {
           const returned = await this.issueServerCommand(`/home ${checkpoint}`, true);
           const nearCheckpoint = checkpointAnchor && checkpointAnchor.dimension === this.currentDimension()
             && this.bot.entity.position.distanceTo(checkpointAnchor.position) <= 8;
@@ -1242,11 +1507,13 @@ class ManagedBot extends EventEmitter {
           } else {
             this.log(`Could not verify return to temporary checkpoint ${checkpoint}; keeping it for manual recovery.`, 'warn');
           }
-        } catch (error) {
-          this.log(`Could not return to temporary checkpoint ${checkpoint}: ${error.message}; keeping it for manual recovery.`, 'warn');
         }
+      } catch (error) {
+        if (regionReturn) this.pauseRegionMining(`could not return to mining Home ${regionReturn.home}: ${error.message}`);
+        else if (checkpoint) this.log(`Could not return to temporary checkpoint ${checkpoint}: ${error.message}; keeping it for manual recovery.`, 'warn');
+      } finally {
+        release();
       }
-      release();
     }
   }
   supplyContainerRole(point) {
@@ -1305,9 +1572,9 @@ class ManagedBot extends EventEmitter {
     if (!bot?.time || bot.isSleeping) return;
     const time = Number(bot.time.timeOfDay);
     if (!(time >= 12541 && time <= 23458)) return;
-    const points = this.matchingSupplyPoints('sleep', { requireAnchor: true }).sort((a, b) => b.priority - a.priority);
+    const points = this.matchingSupplyPoints('sleep').sort((a, b) => b.priority - a.priority);
     if (!points.length) {
-      this.resourceAlert('no-supply-bed', true, '夜晚到了，但没有已初始化且带“睡觉”角色的 Home 补给点；已停止自动移动。', 120000);
+      this.resourceAlert('no-supply-bed', true, '夜晚到了，但没有带“睡觉”角色的 Home 补给点；已停止自动移动。', 120000);
       return;
     }
     for (const point of points) {
@@ -1359,8 +1626,8 @@ class ManagedBot extends EventEmitter {
 
   async prepareHarvestTool(block, taskName) {
     let tool = this.usableHarvestTool(block);
-    if (!tool && this.blockNeedsTool(block) && this.resupplyEnabled) {
-      await this.maybeResupply({ requirePickaxe: true, requireFood: false });
+    if (!tool && this.blockNeedsTool(block) && this.effectiveSkillConfig().supply.enabled && (this.mining || this.regionMining)) {
+      await this.maybeResupply({ requirePickaxe: true, requireFood: false, requireStorage: false });
       tool = this.usableHarvestTool(block);
     }
     if (!tool && this.blockNeedsTool(block)) {
@@ -1500,19 +1767,21 @@ class ManagedBot extends EventEmitter {
       return { ok: true, reason: 'ready', message: 'inventory already has the required supplies' };
     }
 
-    const points = this.matchingSupplyPoints(null, { requireAnchor: true }).filter((point) => (
+    const points = [...this.matchingSupplyPoints(null)].filter((point) => (
       (needStorage && this.supplyPointSupports(point, 'storage')) ||
       (needPickaxe && this.supplyPointSupports(point, 'pickaxe')) ||
       (needFood && this.supplyPointSupports(point, 'food'))
-    )).map((point) => {
-      const storageFirst = needStorage && this.supplyPointSupports(point, 'storage') ? 1 : 0;
-      const distance = this.hasSupplyAnchor(point) ? bot.entity.position.distanceTo(new Vec3(point.x, point.y, point.z)) : Number.POSITIVE_INFINITY;
-      return { ...point, storageFirst, distance };
-    }).sort((a, b) => b.storageFirst - a.storageFirst || b.priority - a.priority || a.distance - b.distance);
+    )).sort((a, b) => {
+      const aStorage = needStorage && this.supplyPointSupports(a, 'storage') ? 1 : 0;
+      const bStorage = needStorage && this.supplyPointSupports(b, 'storage') ? 1 : 0;
+      const aDistance = this.hasSupplyAnchor(a) ? bot.entity.position.distanceTo(new Vec3(a.x, a.y, a.z)) : Number.POSITIVE_INFINITY;
+      const bDistance = this.hasSupplyAnchor(b) ? bot.entity.position.distanceTo(new Vec3(b.x, b.y, b.z)) : Number.POSITIVE_INFINITY;
+      return bStorage - aStorage || b.priority - a.priority || aDistance - bDistance;
+    });
 
     if (!points.length) {
       const roles = [needStorage && '矿物存储', needPickaxe && '镐子补给', needFood && '食物补给'].filter(Boolean).join('、');
-      return { ok: false, reason: 'no-point', message: `没有已初始化且支持${roles}的 Home 补给点；已停止自动移动` };
+      return { ok: false, reason: 'no-point', message: `没有支持${roles}的 Home 补给点；请确认 Home 名称和权限` };
     }
 
     this.resupplyBusy = true;
@@ -1593,7 +1862,7 @@ class ManagedBot extends EventEmitter {
     if (!wasEnabled) this.supplyLoop();
     this.startMaintenanceLoop();
     const anchored = this.resupplyPoints.filter((point) => point.enabled !== false && this.hasSupplyAnchor(point)).length;
-    const message = `[${this.bot?.username || this.displayName}] Home supply enabled${anchored ? ` (${anchored} anchored station${anchored === 1 ? '' : 's'})` : '; no anchored station yet, autonomous movement is paused'}.`;
+    const message = `[${this.bot?.username || this.displayName}] Home supply enabled${anchored ? ` (${anchored} anchored station${anchored === 1 ? '' : 's'})` : '; no anchored station yet, first Home visit will record its anchor'}.`;
     return announce ? this.respond(message) : { ok: true, message };
   }
 
@@ -1630,6 +1899,39 @@ class ManagedBot extends EventEmitter {
     if (this.supply) active.push('supply');
     if (this.chatLogEnabled) active.push('chat-command');
     return active;
+  }
+
+  knownHomes() {
+    const homes = [];
+    if (this.regionPlan?.home) {
+      homes.push({
+        id: `mining-${this.id}`,
+        name: this.regionPlan.home,
+        type: 'mining',
+        label: '初始挖矿点',
+        dimension: this.regionPlan.dimension,
+        position: this.regionPlan.anchor ? { ...this.regionPlan.anchor } : null,
+        initialized: Boolean(this.regionPlan.anchor),
+        active: this.regionMining,
+        phase: this.regionPlan.phase || 'idle'
+      });
+    }
+    for (const point of this.resupplyPoints) {
+      if (!point.home) continue;
+      homes.push({
+        id: point.id,
+        name: point.home,
+        type: point.roles?.includes('storage') && !point.roles.some((role) => ['food', 'pickaxe', 'sleep'].includes(role)) ? 'storage' : 'supply',
+        label: point.name,
+        dimension: point.dimension,
+        position: this.hasSupplyAnchor(point) ? { x: point.x, y: point.y, z: point.z } : null,
+        initialized: this.hasSupplyAnchor(point),
+        active: point.enabled !== false,
+        roles: [...(point.roles || [])],
+        scanRadius: point.scanRadius
+      });
+    }
+    return homes;
   }
 
   publicStatus() {
